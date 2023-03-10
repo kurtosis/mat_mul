@@ -1,16 +1,13 @@
-# This is a sample Python script.
+from model import *
 
-# Press ⌃R to execute it or replace it with your code.
-# Press Double ⇧ to search everywhere for classes, files, tool windows, actions, and settings.
-
-
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press ⌘F8 to toggle the breakpoint.
-
-
-# Press the green button in the gutter to run the script.
-if __name__ == '__main__':
-    print_hi('PyCharm')
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+if __name__ == "__main__":
+    batch_size = 16
+    dim_3d0 = 2
+    dim_t0 = 3
+    dim_s0 = 4
+    dim_c0 = 5
+    torso1 = Torso(2, 3, 4, 5)
+    xx0 = torch.rand(dim_t0, dim_3d0, dim_3d0, dim_3d0)
+    ss0 = torch.rand(dim_s0)
+    ff = torso1(xx0, ss0)
+    print(ff.shape)
