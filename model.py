@@ -383,8 +383,9 @@ class ValueHead(nn.Module):
         return qq
 
 
-def quantile_loss(qq, gg, n, delta=1):
+def quantile_loss(qq, gg, delta=1):
     # qq (n) ; gg (n)
+    n = qq.shape[-1]
     tau = (torch.arange(n, dtype=torch.float32) + 0.5) / n  # (n)
     dd = gg - qq  # (n)
     hh = F.huber_loss(gg, qq, reduction="none", delta=delta)  # (n)
@@ -420,9 +421,11 @@ class AlphaTensor(nn.Module):
     def train(self, xx, ss, g_action, g_value):
         ee = self.torso(xx, ss)  # (3*dim_3d**2, dim_c)
         oo, zz = self.policy_head.train(
-            ee, g_action, self.n_logits
+            ee, g_action
         )  # oo (n_steps, n_logits) ; zz (n_feats*n_heads)
-        l_pol = torch.sum(F.cross_entropy(oo, g_action))
+        # l_pol = torch.sum(F.cross_entropy(oo, g_action))
+        # TO DO: ensure this works correctly
+        l_pol = torch.sum(F.cross_entropy(oo.view(-1, self.n_logits), g_action.view(-1)))
         # TO DO: the dims don't seem correct here
         qq = self.value_head(zz)  # (n)
         l_val = quantile_loss(qq, g_value)
