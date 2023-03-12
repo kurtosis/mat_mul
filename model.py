@@ -1,4 +1,4 @@
-from math import ceil
+from math import ceil, sqrt
 
 import torch
 from torch import nn
@@ -9,7 +9,7 @@ DROPOUT_PROB = 0.5
 
 
 class Head(nn.Module):
-    def __init__(self, c1, c2, d, causal_mask=False):
+    def __init__(self, c1, c2, d, causal_mask=False, **kwargs):
         super().__init__()
         self.d = d
         self.causal_mask = causal_mask
@@ -17,23 +17,39 @@ class Head(nn.Module):
         self.key = nn.Linear(c2, d, bias=False)
         self.value = nn.Linear(c2, d, bias=False)
         # TO DO: put this in buffer, pass nx, ny earlier
-        # self.register_buffer("triu", torch.triu(torch.ones(nx, ny)))
+        # self.register_buffer("triu", torch.triu(torch.ones(nx, ny), dim=1))
 
     def forward(self, x, y):
         # x (*, nx, c1)
         # y (*, ny, c2)
-        q = self.query(x)  # (*, nx, d)
-        k = self.key(y)  # (*, ny, d)
-        v = self.value(y)  # (*, ny, d)
-        a = q @ k.transpose(-2, -1) * self.d**-0.5  # (*, nx, ny)
-        # TO DO: is this the right softmax dim?
-        a = F.softmax(a, dim=-1)  # (*, nx, ny)
         if self.causal_mask:
-            nx = x.shape[-2]
-            ny = y.shape[-2]
-            triu = torch.triu(torch.ones(nx, ny))
-            a = a.masked_fill(triu, 0)
-        out = a @ v  # (*, nx, d)
+            return self.forward_gpt(x, y)
+        else:
+            q = self.query(x)  # (*, nx, d)
+            k = self.key(y)  # (*, ny, d)
+            v = self.value(y)  # (*, ny, d)
+            a = q @ k.transpose(-2, -1) * self.d**-0.5  # (*, nx, ny)
+            a = F.softmax(a, dim=-1)  # (*, nx, ny)
+            # if self.causal_mask:
+            #     nx = x.shape[-2]
+            #     ny = y.shape[-2]
+            #     triu = torch.triu(torch.ones(nx, ny), dim=1)
+            #     a = a.masked_fill(triu, 0)
+            out = a @ v  # (*, nx, d)
+            return out
+
+    def forward_gpt(self, x, y):  # (B,T,n_embd) -> (B,T,head_size)
+        # B, T, C = x.shape
+        nx = x.shape[-2]
+        q = self.query(x)  # (B,T,C) -> (B,T,H)
+        k = self.key(y)  # (B,T,C) -> (B,T,H)
+        v = self.value(y)  # (B,T,C) -> (B,T,H)
+        wei = q @ k.transpose(-2, -1) * self.d**-0.5  # (B,T,H) @ (B,H,T) -> (B,T,T)
+        tril = torch.tril(torch.ones(nx, nx))
+        wei = wei.masked_fill(tril == 0, float("-inf"))
+        wei = F.softmax(wei, dim=-1)  # (B,T,T)
+        # wei = self.dropout(wei)
+        out = wei @ v  # (B,T,T) @ (B,T,H) --> (B,T,H)
         return out
 
 
@@ -47,34 +63,31 @@ class MultiHeadAttention(nn.Module):
         self.n_heads = n_heads
         self.d = d
         self.w = w
-        self.heads = nn.ModuleList(
-            [Head(self.c1, self.c2, self.d, **kwargs) for _ in range(self.n_heads)]
-        )
-        self.li1 = nn.Linear(n_heads * self.d, self.c1)
-        self.ln1 = nn.LayerNorm(self.c1)
-        self.ln2 = nn.LayerNorm(self.c2)
-        self.ln3 = nn.LayerNorm(self.c1)
-        self.li2 = nn.Linear(self.c1, self.c1 * self.w)
-        self.li3 = nn.Linear(self.c1 * self.w, self.c1)
+        self.heads = nn.ModuleList([Head(c1, c2, d, **kwargs) for _ in range(n_heads)])
+        self.li1 = nn.Linear(n_heads * d, c1)
+        self.ln1 = nn.LayerNorm(c1)
+        self.ln2 = nn.LayerNorm(c2)
+        self.ln3 = nn.LayerNorm(c1)
+        self.li2 = nn.Linear(c1, c1 * w)
+        self.li3 = nn.Linear(c1 * w, c1)
 
     def forward(self, x, y):
         # x (*, nx, c1)
         # y (*, ny, c2)
-        x = self.ln1(x)  # (*, nx, c1)
-        y = self.ln2(y)  # (*, ny, c2)
-        out = torch.cat([h(x, y) for h in self.heads], dim=-1)  # (*, nx, n_heads*d)
-        out = x + self.li1(out)  # (*, nx, c1)
-        out0 = out  # (*, nx, c1)
-        out = self.ln3(out)  # (*, nx, c1)
+        x_norm = self.ln1(x)  # (*, nx, c1)
+        y_norm = self.ln2(y)  # (*, ny, c2)
+        x_out = torch.cat(
+            [h(x_norm, y_norm) for h in self.heads], dim=-1
+        )  # (*, nx, n_heads*d)
+        x_out = x + self.li1(x_out)  # (*, nx, c1)
+        out = self.ln3(x_out)  # (*, nx, c1)
         out = self.li2(out)  # (*, nx, c1*w)
         out = F.gelu(out)  # (*, nx, c1*w)
         out = self.li3(out)  # (*, nx, c1)
-        out = out0 + out  # (*, nx, c1)
-        return out
+        return x_out + out
 
 
 class AttentiveMode(nn.Module):
-    # def __init__(self, nx, ny, c1, c2, dim_3d, **kwargs):
     def __init__(self, dim_3d, c1, **kwargs):
         super().__init__()
         # self.nx = nx
@@ -142,6 +155,7 @@ class Torso(nn.Module):
         self.dim_t = dim_t
         self.dim_s = dim_s
         self.dim_c = dim_c
+        self.n_layers = n_layers
         self.ln1 = nn.LayerNorm(self.dim_c)
         self.ln2 = nn.LayerNorm(self.dim_c)
         self.li1 = nn.Linear(self.dim_s, self.dim_3d**2)
@@ -189,8 +203,9 @@ class Torso(nn.Module):
         return ee
 
 
+# Algorithm A.4.a
 class PredictBlock(nn.Module):
-    def __init__(self, n_steps, n_feats, n_heads, dim_m, dim_c):
+    def __init__(self, n_steps, n_feats, n_heads, dim_m, dim_c, **kwargs):
         super().__init__()
         self.n_steps = n_steps
         self.n_feats = n_feats
@@ -216,25 +231,47 @@ class PredictBlock(nn.Module):
             self.dim_c,
             n_heads=self.n_heads,
         )
+        self.lin_ee = nn.Linear(
+            self.dim_m * self.dim_c, self.n_steps * self.n_feats * self.n_heads
+        )
 
-    def forward(self, x_input, training=False):
-        xx, ee = x_input  # xx (*, n_steps, n_feats*n_heads) ; ee (m, c)
+    def forward(self, x_input):
+        xx, ee, training = x_input  # xx (*, n_steps, n_feats*n_heads) ; ee (m, c)
         xx = self.ln1(xx)  # (*, n_steps, n_feats*n_heads)
-        cc = self.att1(xx, xx)  # (*, n_steps, n_feats*n_heads)
-        if training:
-            cc = self.dropout1(cc)
-        xx = xx + cc  # (*, n_steps, n_feats*n_heads)
-        xx = self.ln2(xx)  # (*, n_steps, n_feats*n_heads)
+
+        # Self attention
+        # cc = self.att1(xx, xx)  # (*, n_steps, n_feats*n_heads)
+        # if training:
+        #     cc = self.dropout1(cc)
+        # xx = xx + cc  # (*, n_steps, n_feats*n_heads)
+        # xx = self.ln2(xx)  # (*, n_steps, n_feats*n_heads)
+
+        # Cross attention
         cc = self.att2(xx, ee)  # (*, n_steps, n_feats*n_heads)
         if training:
             cc = self.dropout2(cc)
         xx = xx + cc  # (*, n_steps, n_feats*n_heads)
-        return xx, ee
+
+        return xx, ee, training
+
+        # Linear layer replacement
+        # cc = self.lin_ee(ee.view(ee.shape[0], -1))
+        # cc = cc.view(xx.shape)
+        # return cc, ee
 
 
+# Algorithm A.4
 class PredictActionLogits(nn.Module):
     def __init__(
-        self, n_steps, n_logits, dim_m, dim_c, n_feats=64, n_heads=32, n_layers=2
+        self,
+        n_steps,
+        n_logits,
+        dim_m,
+        dim_c,
+        n_feats=64,
+        n_heads=32,
+        n_layers=2,
+        **kwargs
     ):
         super().__init__()
         self.n_steps = n_steps
@@ -246,6 +283,9 @@ class PredictActionLogits(nn.Module):
         self.n_layers = n_layers
         self.li1 = nn.Linear(self.n_logits, self.n_feats * self.n_heads)
         # TO DO: how many dims do we need pos enc over?
+        # self.pos_enc = nn.Embedding(
+        #     self.n_steps, self.n_feats * self.n_heads
+        # )  # (*,1) -> (*,C) (n_embed)
         self.pos_enc = nn.Parameter(
             torch.rand(self.n_steps, self.n_feats * self.n_heads)
         )
@@ -259,11 +299,13 @@ class PredictActionLogits(nn.Module):
         )
         self.li2 = nn.Linear(self.n_feats * self.n_heads, self.n_logits)
 
-    def forward(self, aa, ee):
+    def forward(self, aa, ee, training=False, **kwargs):
         # aa (n_steps, n_logits) ; ee (dim_m, dim_c)
         xx = self.li1(aa)  # (n_steps, n_feats*n_heads)
         xx = xx + self.pos_enc  # (n_steps, n_feats*n_heads)
-        xx, _ = self.blocks((xx, ee))  # (n_steps, n_feats*n_heads)
+        # Test that we can learn from pos_enc alone
+        # xx = 0*xx + self.pos_enc
+        xx, _, _ = self.blocks((xx, ee, training))  # (n_steps, n_feats*n_heads)
         oo = F.relu(xx)  # (n_steps, n_feats*n_heads)
         oo = self.li2(oo)  # (n_steps, n_logits)
         return oo, xx
@@ -285,25 +327,29 @@ class PolicyHead(nn.Module):
             self.n_logits,
             self.dim_m,
             self.dim_c,
-            n_feats=self.n_feats,
-            n_heads=self.n_heads,
+            n_feats=n_feats,
+            n_heads=n_heads,
             **kwargs,
         )
 
     def train(self, ee, gg):
         # ee (*, dim_m, dim_c) ; gg (*, n_steps)
-        gg = gg.type(torch.LongTensor).roll(1)  # (n_steps)
+        # gg = gg.type(torch.LongTensor).roll(1)  # (n_steps)
+        # gg = gg.type(torch.LongTensor).roll(shifts=-1, dims=1)
+        gg = gg.type(torch.LongTensor).roll(shifts=-1)  # (n_steps)
+        # gg = gg.type(torch.LongTensor)  # (n_steps)
         gg = F.one_hot(gg, num_classes=self.n_logits).type(
             torch.FloatTensor
         )  # (*, n_steps, n_logits)
         oo, zz = self.predict_action_logits(
-            gg, ee
+            gg, ee, True,
         )  # oo (*, n_steps, n_logits) ; zz (*, n_steps, n_feats*n_heads)
         return oo, zz[:, 0, :]
 
     def infer(self, ee, n_samples=32):
         batch_size = ee.shape[0]
         aa = torch.zeros(batch_size, n_samples, self.n_steps, dtype=torch.long)
+        # aa = -1*torch.ones(batch_size, n_samples, self.n_steps, dtype=torch.long)
         pp = torch.ones(batch_size, n_samples)
         oo = torch.zeros(batch_size, n_samples, self.n_steps, self.n_logits)
         zz = torch.zeros(batch_size, self.n_steps, self.n_feats * self.n_heads)
@@ -312,7 +358,10 @@ class PolicyHead(nn.Module):
                 gg = F.one_hot(aa[:, s, :], num_classes=self.n_logits).type(
                     torch.FloatTensor
                 )  # (batch_size, n_samples, n_steps, n_logits)
-                oo[:, s, :, :], zz = self.predict_action_logits(gg, ee)
+                # gg = F.one_hot(aa[:, s, :].roll(1), num_classes=self.n_logits).type(
+                #     torch.FloatTensor
+                # )  # (batch_size, n_samples, n_steps, n_logits)
+                oo[:, s, :, :], zz = self.predict_action_logits(gg, ee, False)
                 distrib = Categorical(logits=oo[:, s, i, :])
                 aa[:, s, i] = distrib.sample()
                 p_i = distrib.probs[
@@ -356,31 +405,20 @@ class PolicyHead(nn.Module):
 
 
 class ValueHead(nn.Module):
-    def __init__(self, dim_c, n_out=8):
+    def __init__(self, n_feats=64, n_heads=32, n_hidden=512, n_quantile=8, **kwargs):
         super().__init__()
-        self.dim_c = dim_c
-        self.n_out = n_out
         self.mlp = nn.Sequential(
-            nn.Linear(self.dim_c, 512),
+            nn.Linear(n_feats * n_heads, n_hidden),
             nn.ReLU(),
-            nn.Linear(512, 512),
+            nn.Linear(n_hidden, n_hidden),
             nn.ReLU(),
-            nn.Linear(512, 512),
+            nn.Linear(n_hidden, n_hidden),
             nn.ReLU(),
-            nn.Linear(512, self.n_out),
+            nn.Linear(n_hidden, n_quantile),
         )
-        # self.li1 = nn.Linear(self.dim_c, 512)
-        # self.li2 = nn.Linear(512, 512)
-        # self.li3 = nn.Linear(512, 512)
-        # self.li4 = nn.Linear(512, self.n)
 
     def forward(self, xx):
-        # xx (dim_c)
-        # xx = F.relu(self.li1(xx))  # (512)
-        # xx = F.relu(self.li2(xx))  # (512)
-        # xx = F.relu(self.li3(xx))  # (512)
-        qq = self.mlp(xx)  # (n_out)
-        return qq
+        return self.mlp(xx)  # (n_quantile)
 
 
 def quantile_loss(qq, gg, delta=1):
@@ -394,7 +432,17 @@ def quantile_loss(qq, gg, delta=1):
 
 
 class AlphaTensor(nn.Module):
-    def __init__(self, dim_3d, dim_t, dim_s, dim_c, n_samples, n_steps, n_logits):
+    def __init__(
+        self,
+        dim_3d=4,
+        dim_t=8,
+        dim_s=1,
+        dim_c=16,
+        n_samples=32,
+        n_steps=12,
+        n_logits=3,
+        **kwargs
+    ):
         super().__init__()
         self.dim_3d = dim_3d
         self.dim_t = dim_t
@@ -403,15 +451,31 @@ class AlphaTensor(nn.Module):
         self.n_samples = n_samples
         self.n_steps = n_steps
         self.n_logits = n_logits
-        self.torso = Torso(self.dim_3d, self.dim_t, self.dim_s, self.dim_c)
+        self.torso = Torso(dim_3d, dim_t, dim_s, dim_c, **kwargs)
         self.policy_head = PolicyHead(
-            self.n_steps, self.n_logits, 3 * self.dim_3d**2, self.dim_c
+            n_steps, n_logits, 3 * dim_3d**2, dim_c, **kwargs
         )
         # TO DO: figure out how to run 2048 dim through
-        self.value_head = ValueHead(2048)
+        self.value_head = ValueHead(**kwargs)
 
-    # def quantile_loss(self, qq, aa, rr):
-    #     pass
+    def _init_weights(self):
+        for m in self.modules():
+            if type(m) in {
+                nn.Linear,
+                nn.Conv3d,
+                nn.Conv2d,
+                nn.ConvTranspose2d,
+                nn.ConvTranspose3d,
+            }:
+                nn.init.kaiming_normal_(
+                    m.weight.data, a=0, mode="fan_out", nonlinearity="relu"
+                )
+                if m.bias is not None:
+                    fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(
+                        m.weight.data
+                    )
+                    bound = 1 / sqrt(fan_out)
+                    nn.init.normal_(m.bias, -bound, bound)
 
     def value_risk_mgmt(self, qq, uq=0.75):
         # qq (batch_size, n)
@@ -422,10 +486,10 @@ class AlphaTensor(nn.Module):
         ee = self.torso(xx, ss)  # (3*dim_3d**2, dim_c)
         oo, zz = self.policy_head.train(
             ee, g_action
-        )  # oo (n_steps, n_logits) ; zz (n_feats*n_heads)
-        # l_pol = torch.sum(F.cross_entropy(oo, g_action))
-        # TO DO: ensure this works correctly
-        l_pol = torch.sum(F.cross_entropy(oo.view(-1, self.n_logits), g_action.view(-1)))
+        )  # oo (*, n_steps, n_logits) ; zz (*, n_feats*n_heads)
+        l_pol = F.cross_entropy(
+            oo.view(-1, self.n_logits), g_action.view(-1), reduction="sum"
+        )
         # TO DO: the dims don't seem correct here
         qq = self.value_head(zz)  # (n)
         l_val = quantile_loss(qq, g_value)
