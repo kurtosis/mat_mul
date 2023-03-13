@@ -9,7 +9,7 @@ DROPOUT_PROB = 0.5
 
 
 class Head(nn.Module):
-    def __init__(self, c1, c2, d, causal_mask=False, **kwargs):
+    def __init__(self, c1: int, c2: int, d: int, causal_mask=False, **kwargs):
         super().__init__()
         self.d = d
         self.causal_mask = causal_mask
@@ -22,34 +22,14 @@ class Head(nn.Module):
     def forward(self, x, y):
         # x (*, nx, c1)
         # y (*, ny, c2)
+        q = self.query(x)  # (*, nx, d)
+        k = self.key(y)  # (*, ny, d)
+        v = self.value(y)  # (*, ny, d)
+        a = q @ k.transpose(-2, -1) * self.d**-0.5  # (*, nx, ny)
+        a = F.softmax(a, dim=-1)  # (*, nx, ny)
         if self.causal_mask:
-            return self.forward_gpt(x, y)
-        else:
-            q = self.query(x)  # (*, nx, d)
-            k = self.key(y)  # (*, ny, d)
-            v = self.value(y)  # (*, ny, d)
-            a = q @ k.transpose(-2, -1) * self.d**-0.5  # (*, nx, ny)
-            a = F.softmax(a, dim=-1)  # (*, nx, ny)
-            # if self.causal_mask:
-            #     nx = x.shape[-2]
-            #     ny = y.shape[-2]
-            #     triu = torch.triu(torch.ones(nx, ny), dim=1)
-            #     a = a.masked_fill(triu, 0)
-            out = a @ v  # (*, nx, d)
-            return out
-
-    def forward_gpt(self, x, y):  # (B,T,n_embd) -> (B,T,head_size)
-        # B, T, C = x.shape
-        nx = x.shape[-2]
-        q = self.query(x)  # (B,T,C) -> (B,T,H)
-        k = self.key(y)  # (B,T,C) -> (B,T,H)
-        v = self.value(y)  # (B,T,C) -> (B,T,H)
-        wei = q @ k.transpose(-2, -1) * self.d**-0.5  # (B,T,H) @ (B,H,T) -> (B,T,T)
-        tril = torch.tril(torch.ones(nx, nx))
-        wei = wei.masked_fill(tril == 0, float("-inf"))
-        wei = F.softmax(wei, dim=-1)  # (B,T,T)
-        # wei = self.dropout(wei)
-        out = wei @ v  # (B,T,T) @ (B,T,H) --> (B,T,H)
+            a = torch.triu(a, diagonal=1)
+        out = a @ v  # (*, nx, d)
         return out
 
 
@@ -135,6 +115,7 @@ class AttentiveModeBatch(nn.Module):
         # x1, x2, x3 = x_input
         # x1,x2,x3 are all (*, dim_3d,dim_3d,c)
         for m1, m2 in [(0, 1), (1, 2), (2, 0)]:
+            # TO DO: confirm transpose is correct
             a = torch.cat(
                 (g[m1], g[m2].transpose(-2, -3)), dim=-2
             )  # (*, dim_3d,2*dim_3d,c)
@@ -158,8 +139,12 @@ class Torso(nn.Module):
         self.n_layers = n_layers
         self.ln1 = nn.LayerNorm(self.dim_c)
         self.ln2 = nn.LayerNorm(self.dim_c)
-        self.li1 = nn.Linear(self.dim_s, self.dim_3d**2)
-        self.li2 = nn.Linear(self.dim_3d * self.dim_t + 1, self.dim_c)
+        self.li1 = nn.ModuleList(
+            [nn.Linear(self.dim_s, self.dim_3d**2) for _ in range(3)]
+        )
+        self.li2 = nn.ModuleList(
+            [nn.Linear(self.dim_3d * self.dim_t + 1, self.dim_c) for _ in range(3)]
+        )
         self.blocks = nn.Sequential(
             *[
                 AttentiveModeBatch(self.dim_3d, self.dim_c, **kwargs)
@@ -172,33 +157,23 @@ class Torso(nn.Module):
         # assumes batch size dim!
         # xx (*, dim_t, dim_3d, dim_3d, dim_3d)
         # ss (*, dim_s)
-        # x1 = xx.permute(1, 2, 3, 0).reshape(
-        # x1 = xx.permute(-3, -2, -1, -4).reshape(
         x1 = xx.permute(0, 2, 3, 4, 1).reshape(
             -1, self.dim_3d, self.dim_3d, self.dim_3d * self.dim_t
         )  # (*, dim_3d, dim_3d, dim_3d*dim_t)
-        # x2 = xx.permute(3, 1, 2, 0).reshape(
-        # x2 = xx.permute(-1, -3, -2, -4).reshape(
         x2 = xx.permute(0, 4, 2, 3, 1).reshape(
             -1, self.dim_3d, self.dim_3d, self.dim_3d * self.dim_t
         )  # (*, dim_3d, dim_3d, dim_3d*dim_t)
-        # x3 = xx.permute(2, 3, 1, 0).reshape(
-        # x3 = xx.permute(-2, -1, -3, -4).reshape(
         x3 = xx.permute(0, 3, 4, 2, 1).reshape(
             -1, self.dim_3d, self.dim_3d, self.dim_3d * self.dim_t
         )  # (*, dim_3d, dim_3d, dim_3d*dim_t)
         g = [x1, x2, x3]  # [(*, dim_3d, dim_3d, dim_3d*dim_t)] * 3
         for i in range(3):
-            p = self.li1(ss)  # (*, dim_3d**2)
+            p = self.li1[i](ss)  # (*, dim_3d**2)
             p = p.reshape(-1, self.dim_3d, self.dim_3d, 1)  # (*, dim_3d, dim_3d, 1)
             g[i] = torch.cat([g[i], p], dim=-1)  # (*, dim_3d, dim_3d, dim_3d*dim_t+1)
-            g[i] = self.li2(g[i])  # (*, dim_3d, dim_3d, dim_c)
-        # x1, x2, x3 = g
-        # x1, x2, x3 = self.blocks(x1, x2, x3)
+            g[i] = self.li2[i](g[i])  # (*, dim_3d, dim_3d, dim_c)
         g = self.blocks(g)  # [(*, dim_3d, dim_3d, dim_c)] * 3
-        # ee = torch.stack(g, dim=1)  # (*, dim_3d, dim_3d, dim_c)
-        ee = torch.stack(g, dim=-4)  # (*, 3, dim_3d, dim_3d, dim_c)
-        # ee = torch.stack((x1, x2, x3), dim=1)
+        ee = torch.stack(g, dim=2)  # (*, 3, dim_3d, dim_3d, dim_c)
         ee = ee.reshape(-1, 3 * self.dim_3d**2, self.dim_c)  # (*, 3*dim_3d**2, dim_c)
         return ee
 
@@ -235,25 +210,20 @@ class PredictBlock(nn.Module):
             self.dim_m * self.dim_c, self.n_steps * self.n_feats * self.n_heads
         )
 
-    def forward(self, x_input):
-        xx, ee, training = x_input  # xx (*, n_steps, n_feats*n_heads) ; ee (m, c)
+    def forward(self, xx, ee, training):
         xx = self.ln1(xx)  # (*, n_steps, n_feats*n_heads)
-
         # Self attention
-        # cc = self.att1(xx, xx)  # (*, n_steps, n_feats*n_heads)
-        # if training:
-        #     cc = self.dropout1(cc)
-        # xx = xx + cc  # (*, n_steps, n_feats*n_heads)
-        # xx = self.ln2(xx)  # (*, n_steps, n_feats*n_heads)
-
+        cc = self.att1(xx, xx)  # (*, n_steps, n_feats*n_heads)
+        if training:
+            cc = self.dropout1(cc)
+        xx = xx + cc  # (*, n_steps, n_feats*n_heads)
+        xx = self.ln2(xx)  # (*, n_steps, n_feats*n_heads)
         # Cross attention
         cc = self.att2(xx, ee)  # (*, n_steps, n_feats*n_heads)
         if training:
             cc = self.dropout2(cc)
         xx = xx + cc  # (*, n_steps, n_feats*n_heads)
-
         return xx, ee, training
-
         # Linear layer replacement
         # cc = self.lin_ee(ee.view(ee.shape[0], -1))
         # cc = cc.view(xx.shape)
@@ -303,9 +273,8 @@ class PredictActionLogits(nn.Module):
         # aa (n_steps, n_logits) ; ee (dim_m, dim_c)
         xx = self.li1(aa)  # (n_steps, n_feats*n_heads)
         xx = xx + self.pos_enc  # (n_steps, n_feats*n_heads)
-        # Test that we can learn from pos_enc alone
-        # xx = 0*xx + self.pos_enc
-        xx, _, _ = self.blocks((xx, ee, training))  # (n_steps, n_feats*n_heads)
+        for block in self.blocks:
+            xx = block(xx, ee, training)
         oo = F.relu(xx)  # (n_steps, n_feats*n_heads)
         oo = self.li2(oo)  # (n_steps, n_logits)
         return oo, xx
@@ -332,42 +301,40 @@ class PolicyHead(nn.Module):
             **kwargs,
         )
 
-    def train(self, ee, gg):
-        # ee (*, dim_m, dim_c) ; gg (*, n_steps)
-        # gg = gg.type(torch.LongTensor).roll(1)  # (n_steps)
-        # gg = gg.type(torch.LongTensor).roll(shifts=-1, dims=1)
-        gg = gg.type(torch.LongTensor).roll(shifts=-1)  # (n_steps)
-        # gg = gg.type(torch.LongTensor)  # (n_steps)
+    def train(self, ee: torch.Tensor, gg: torch.Tensor):
+        # ee (B, dim_m, dim_c) ; gg (B, n_steps)
+        gg = gg.type(torch.LongTensor).roll(shifts=-1, dims=1)  # (n_steps)
+        # TO DO: is one hot correct here?
         gg = F.one_hot(gg, num_classes=self.n_logits).type(
             torch.FloatTensor
         )  # (*, n_steps, n_logits)
         oo, zz = self.predict_action_logits(
-            gg, ee, True,
+            gg,
+            ee,
+            True,
         )  # oo (*, n_steps, n_logits) ; zz (*, n_steps, n_feats*n_heads)
         return oo, zz[:, 0, :]
 
-    def infer(self, ee, n_samples=32):
+    def infer(self, ee: torch.Tensor, n_samples=32):
         batch_size = ee.shape[0]
         aa = torch.zeros(batch_size, n_samples, self.n_steps, dtype=torch.long)
-        # aa = -1*torch.ones(batch_size, n_samples, self.n_steps, dtype=torch.long)
         pp = torch.ones(batch_size, n_samples)
-        oo = torch.zeros(batch_size, n_samples, self.n_steps, self.n_logits)
-        zz = torch.zeros(batch_size, self.n_steps, self.n_feats * self.n_heads)
-        for s in range(n_samples):
-            for i in range(self.n_steps):
-                gg = F.one_hot(aa[:, s, :], num_classes=self.n_logits).type(
-                    torch.FloatTensor
-                )  # (batch_size, n_samples, n_steps, n_logits)
-                # gg = F.one_hot(aa[:, s, :].roll(1), num_classes=self.n_logits).type(
-                #     torch.FloatTensor
-                # )  # (batch_size, n_samples, n_steps, n_logits)
-                oo[:, s, :, :], zz = self.predict_action_logits(gg, ee, False)
-                distrib = Categorical(logits=oo[:, s, i, :])
-                aa[:, s, i] = distrib.sample()
-                p_i = distrib.probs[
-                    torch.arange(batch_size), aa[:, s, i]
-                ]  # (batch_size)
-                pp[:, s] = torch.mul(pp[:, s], p_i)
+        # TO DO: understand these lines
+        ee = ee.unsqueeze(1).repeat(1, n_samples, 1, 1)  # (B, n_samples, dim_m, dim_c)
+        aa = aa.view(-1, self.n_steps)  # (B*n_samples, n_steps)
+        pp = pp.view(-1)  # (B*n_samples)
+        ee = ee.view(-1, ee.shape[-2], ee.shape[-1])  # (B*n_samples, dim_m, dim_c)
+        # oo = torch.zeros(batch_size, self.n_steps, self.n_logits)
+        # zz = torch.zeros(batch_size, self.n_steps, self.n_feats * self.n_heads)
+        for i in range(self.n_steps):
+            gg = F.one_hot(aa[:, i], num_classes=self.n_logits).type(
+                torch.FloatTensor
+            )  # (batch_size, n_samples, n_steps, n_logits)
+            oo, zz = self.predict_action_logits(gg, ee, False)
+            distrib = Categorical(logits=oo[:, s, i, :])
+            aa[:, s, i] = distrib.sample()
+            p_i = distrib.probs[torch.arange(batch_size), aa[:, s, i]]  # (batch_size)
+            pp[:, s] = torch.mul(pp[:, s], p_i)
         return (
             aa,
             pp,
@@ -427,6 +394,7 @@ def quantile_loss(qq, gg, delta=1):
     tau = (torch.arange(n, dtype=torch.float32) + 0.5) / n  # (n)
     dd = gg - qq  # (n)
     hh = F.huber_loss(gg, qq, reduction="none", delta=delta)  # (n)
+    # TO DO: is the sign of dd correct?
     kk = torch.abs(tau - (dd < 0).float())  # (n)
     return torch.mean(torch.mul(hh, kk))  # ()
 
@@ -479,8 +447,9 @@ class AlphaTensor(nn.Module):
 
     def value_risk_mgmt(self, qq, uq=0.75):
         # qq (batch_size, n)
+        # TO DO: can make this int?
         jj = ceil(uq * qq.shape[-1]) - 1
-        return qq[:, jj:].mean()
+        return torch.mean(qq[:, jj:], dim=-1)
 
     def train(self, xx, ss, g_action, g_value):
         ee = self.torso(xx, ss)  # (3*dim_3d**2, dim_c)
