@@ -6,7 +6,7 @@ from synthetic_examples import *
 torch.manual_seed(1337)
 lr = 1e-3
 max_iters = 2001
-check_interval = 400
+check_interval = 4
 batch_size = 1
 dim_3d = 4
 dim_t = 1
@@ -17,13 +17,15 @@ n_samples = 32
 n_steps = 12
 n_quantile = 8
 
-device = (
-    "cuda"
-    if torch.cuda.is_available()
-    else "mps"
-    if torch.backends.mps.is_available()
-    else "cpu"
-)
+# device = (
+#     "cuda"
+#     if torch.cuda.is_available()
+#     else "mps"
+#     if torch.backends.mps.is_available()
+#     else "cpu"
+# )
+
+device = "mps"
 
 
 # alpha = alpha.to(device)
@@ -42,32 +44,39 @@ def print_params(alpha):
     )
 
 
+strassen_tensor, strassen_steps = get_strassen(device)
+
+
 def test_single_action():
     dim_t = 2
-    xx = strassen_tensor.unsqueeze(0).unsqueeze(0)
+    xx = strassen_tensor
+    xx = xx.to(device)
+    xx = xx.unsqueeze(0).unsqueeze(0)
     xx = torch.cat([xx for _ in range(dim_t)], 1)
     xx = torch.cat([xx for _ in range(batch_size)], 0)
-    ss = torch.zeros(batch_size, dim_s)
+    ss = torch.zeros(batch_size, dim_s, device=device)
+    alpha = AlphaTensor(
+        dim_3d=4,
+        dim_t=dim_t,
+        dim_s=1,
+        dim_c=8,
+        n_samples=1,
+        n_steps=12,
+        n_logits=4,
+        n_feats=8,
+        n_heads=2,
+        n_hidden=8,
+        device=device,
+    )
+    alpha = alpha.to(device)
+    print_params(alpha)
     for i_action in range(strassen_steps.shape[0]):
-        alpha = AlphaTensor(
-            dim_3d=4,
-            dim_t=dim_t,
-            dim_s=1,
-            dim_c=8,
-            n_samples=1,
-            n_steps=12,
-            n_logits=4,
-            n_feats=8,
-            n_heads=2,
-            n_hidden=8,
-        )
-        # print_params(alpha)
         optimizer = torch.optim.AdamW(alpha.parameters(), lr=lr)
         g_action = strassen_steps[i_action].unsqueeze(0)
         # reserve 0 for <SOS> token (used in infer)
         g_action = g_action + 1
         g_action = torch.cat([g_action for _ in range(batch_size)], 0)
-        g_value = torch.ones(1).unsqueeze(0)
+        g_value = torch.ones(1, device=device).unsqueeze(0)
         g_value = torch.cat([g_value for _ in range(batch_size)], 0)
         for ii in range(max_iters):
             l_pol, l_val = alpha.train(xx, ss, g_action, g_value)

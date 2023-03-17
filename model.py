@@ -5,11 +5,12 @@ from torch import nn
 from torch.nn import functional as F
 from torch.distributions.categorical import Categorical
 
+
 DROPOUT_PROB = 0.5
 
 
-def create_fixed_positional_encoding(n_position: int, n_embedding: int):
-    pe = torch.zeros(n_position, n_embedding)
+def create_fixed_positional_encoding(n_position: int, n_embedding: int, device: str):
+    pe = torch.zeros(n_position, n_embedding, device=device)
     positions = torch.arange(n_position)  # .unsqueeze(1)
     denominators = 10000 ** (-torch.arange(0, n_embedding, 2) / n_embedding)
     pe[:, 0::2] = torch.outer(positions, denominators).sin()
@@ -249,6 +250,7 @@ class PredictActionLogits(nn.Module):
         n_feats=64,
         n_heads=32,
         n_layers=2,
+        device="cpu",
         **kwargs
     ):
         super().__init__()
@@ -261,21 +263,21 @@ class PredictActionLogits(nn.Module):
         self.n_layers = n_layers
         self.emb1 = nn.Embedding(n_logits, n_feats * n_heads)
         self.pos_enc = nn.Parameter(
-            torch.rand(self.n_steps, self.n_feats * self.n_heads)
+            torch.rand(n_steps, n_feats * n_heads)
         )
         pos_enc_fix = create_fixed_positional_encoding(
-            self.n_steps, self.n_feats * self.n_heads
+            n_steps, n_feats * n_heads, device
         )
         self.register_buffer("pos_enc_fix", pos_enc_fix)
         self.blocks = nn.Sequential(
             *[
                 PredictBlock(
-                    self.n_steps, self.n_feats, self.n_heads, self.dim_m, self.dim_c
+                    n_steps, n_feats, n_heads, dim_m, dim_c
                 )
-                for _ in range(self.n_layers)
+                for _ in range(n_layers)
             ]
         )
-        self.li1 = nn.Linear(self.n_feats * self.n_heads, self.n_logits)
+        self.li1 = nn.Linear(n_feats * n_heads, n_logits)
 
     def forward(self, aa: torch.Tensor, ee: torch.Tensor, training=False, **kwargs):
         # aa (n_steps, n_logits) ; ee (dim_m, dim_c)
@@ -299,6 +301,7 @@ class PolicyHead(nn.Module):
         dim_c: int,
         n_feats=64,
         n_heads=32,
+        device="cpu",
         **kwargs
     ):
         super().__init__()
@@ -308,6 +311,7 @@ class PolicyHead(nn.Module):
         self.dim_c = dim_c
         self.n_feats = n_feats
         self.n_heads = n_heads
+        self.device = device
         self.predict_action_logits = PredictActionLogits(
             self.n_steps,
             self.n_logits,
@@ -320,8 +324,14 @@ class PolicyHead(nn.Module):
 
     def train(self, ee: torch.Tensor, gg: torch.Tensor):
         # ee (B, dim_m, dim_c) ; gg (B, n_steps)
-        gg = gg.type(torch.LongTensor).roll(shifts=1, dims=1)  # (n_steps)
-        gg[0, 0] = 0
+        if self.device == "mps":
+            gg_shifted = torch.zeros_like(gg, dtype=torch.long)
+            gg_shifted[:, 1:] = gg[:, :-1]
+            gg = gg_shifted
+        else:
+            gg = gg.long().roll(shifts=1, dims=1)  # (n_steps)
+            gg[0, 0] = 0
+
         oo, zz = self.predict_action_logits(
             gg,
             ee,
@@ -331,8 +341,10 @@ class PolicyHead(nn.Module):
 
     def infer(self, ee: torch.Tensor, n_samples=32):
         batch_size = ee.shape[0]
-        aa = torch.zeros(batch_size, n_samples, self.n_steps + 1, dtype=torch.long)
-        pp = torch.ones(batch_size, n_samples)
+        aa = torch.zeros(
+            batch_size, n_samples, self.n_steps + 1, dtype=torch.long, device=self.device
+        )
+        pp = torch.ones(batch_size, n_samples, device=self.device)
         # TO DO: understand these lines
         ee = ee.unsqueeze(1).repeat(1, n_samples, 1, 1)  # (1, n_samples, dim_m, dim_c)
         aa = aa.view(-1, self.n_steps + 1)  # (1*n_samples, n_steps)
@@ -368,11 +380,11 @@ class ValueHead(nn.Module):
         return self.mlp(xx)  # (n_quantile)
 
 
-def quantile_loss(qq: torch.Tensor, gg: torch.Tensor, delta=1):
+def quantile_loss(qq: torch.Tensor, gg: torch.Tensor, delta=1, device="cpu"):
     # qq (n) ; gg (*)
     n = qq.shape[-1]
     # TO DO: store tau in buffer?
-    tau = (torch.arange(n, dtype=torch.float32) + 0.5) / n  # (n)
+    tau = (torch.arange(n, dtype=torch.float32, device=device) + 0.5) / n  # (n)
     hh = F.huber_loss(gg, qq, reduction="none", delta=delta)  # (n)
     dd = gg - qq  # (n)
     # TO DO: is the sign of dd correct?
@@ -392,6 +404,7 @@ class AlphaTensor(nn.Module):
         n_samples=32,
         n_steps=12,
         n_logits=3,
+        device="cpu",
         **kwargs
     ):
         super().__init__()
@@ -402,9 +415,10 @@ class AlphaTensor(nn.Module):
         self.n_samples = n_samples
         self.n_steps = n_steps
         self.n_logits = n_logits
+        self.device = device
         self.torso = Torso(dim_3d, dim_t, dim_s, dim_c, **kwargs)
         self.policy_head = PolicyHead(
-            n_steps, n_logits, 3 * dim_3d**2, dim_c, **kwargs
+            n_steps, n_logits, 3 * dim_3d**2, dim_c, device=device, **kwargs
         )
         # TO DO: figure out how to run 2048 dim through
         self.value_head = ValueHead(**kwargs)
@@ -431,7 +445,7 @@ class AlphaTensor(nn.Module):
         )
         # TO DO: the dims don't seem correct here
         qq = self.value_head(zz)  # (n)
-        l_val = quantile_loss(qq, g_value)
+        l_val = quantile_loss(qq, g_value, device=self.device)
         return l_pol, l_val
 
     def infer(self, xx: torch.Tensor, ss: torch.Tensor):
