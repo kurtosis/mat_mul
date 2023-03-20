@@ -2,6 +2,7 @@ from time import time
 
 from model import *
 from synthetic_examples import *
+from utils import *
 
 torch.manual_seed(1337)
 lr = 1e-3
@@ -27,24 +28,7 @@ n_quantile = 8
 
 device = "mps"
 
-
-# alpha = alpha.to(device)
-def print_params(alpha):
-    print(f"{sum(p.numel() for p in alpha.parameters()) // int(1e6)}M parameters")
-    print(f"{sum(p.numel() for p in alpha.torso.parameters())} parameters: torso")
-    print(
-        f"{sum(p.numel() for p in alpha.policy_head.parameters()) // int(1e6)}M parameters: policy head"
-    )
-    print(
-        f"{sum(p.numel() for p in alpha.policy_head.parameters())} parameters: policy head"
-    )
-    # print(f"{sum(p.numel() for p in alpha.value_head.parameters()) // int(1e3)}k parameters: value head")
-    print(
-        f"{sum(p.numel() for p in alpha.value_head.parameters())} parameters: value head"
-    )
-
-
-strassen_tensor, strassen_steps = get_strassen(device)
+strassen_tensor, strassen_steps = get_strassen_tensor(device)
 
 
 def test_single_action():

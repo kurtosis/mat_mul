@@ -2,14 +2,16 @@ import os.path
 from pathlib import Path
 from typing import List, Tuple
 
-import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
+
+from synthetic_examples import *
 
 SAVE_DIR_SYNTH_DEMOS = str(Path.home() / "./data/synthetic_demos")
 
 
 def factors_to_tensor(factors: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
-    """ convert the factors defining an action to their outer product"""
+    """Convert the factor triplet defining an action to their outer product tensor.
+    """
     uu, vv, ww = factors
     tensor_action = uu.view(-1, 1, 1) * vv.view(1, -1, 1) * ww.view(1, 1, -1)
     return tensor_action
@@ -26,8 +28,9 @@ def take_actions(
     return target_tensor
 
 
-class SyntheticDemoBuffer(Dataset):
-    """Create a set of synthetic demonstrations and save to disk."""
+class SyntheticDemoDataset(Dataset):
+    """Create a set of synthetic demonstrations and save to disk.
+    """
 
     def __init__(
         self,
@@ -72,11 +75,9 @@ class SyntheticDemoBuffer(Dataset):
     def __getitem__(self, idx: int):
         i = idx // self.max_rank
         j = idx % self.max_rank
-        action_list = torch.load(
-            os.path.join(self.save_dir, f"action_list_{self.len_data}.pt")
-        )
+        action_list = torch.load(os.path.join(self.save_dir, f"action_list_{i}.pt"))
         target_tensor = torch.load(
-            os.path.join(self.save_dir, f"target_tensor_{self.len_data}.pt"),
+            os.path.join(self.save_dir, f"target_tensor_{i}.pt"),
         )
         if j != self.max_rank - 1:
             actions = action_list[j + 1 :]
@@ -118,9 +119,9 @@ class SyntheticDemoBuffer(Dataset):
             for i in range(self.max_rank):
                 valid_action = False
                 while not valid_action:
-                    uu = self.distrib(self.dim_3d)
-                    vv = self.distrib(self.dim_3d)
-                    ww = self.distrib(self.dim_3d)
+                    uu = self.distrib.sample(torch.Size([self.dim_3d]))
+                    vv = self.distrib.sample(torch.Size([self.dim_3d]))
+                    ww = self.distrib.sample(torch.Size([self.dim_3d]))
                     tensor_update = (
                         uu.view(-1, 1, 1) * vv.view(1, -1, 1) * ww.view(1, 1, -1)
                     )
@@ -129,3 +130,73 @@ class SyntheticDemoBuffer(Dataset):
                         action_list.append((uu, vv, ww))
                         target_tensor += tensor_update
             yield action_list, target_tensor
+
+
+class StrassenDemoDataset(Dataset):
+    """Dataset of all valid (states, action) pairs in all permutations of the Strassen factorization
+    for 2x2 matrix multiplication.
+    Note:
+        All data is held in memory (448 demonstrations), not written/read from disk.
+        Assumes T=1, does not hold prior tensor states.
+    """
+
+    def __init__(self, max_len=None):
+        self.n_total = 7
+        self.n_demos = 0
+        self.state_tensor = []
+        self.target_action = []
+        self.reward = []
+        self.scalar = []
+        self.device = "cpu"
+        self.bit_info = []
+        strassen_tensor, action_list = get_strassen_tensor(self.device)
+        uu_strassen, vv_strassen, ww_strassen = get_strassen_factors(self.device)
+        for i_bits in range(2 ** self.n_total):
+            bitstring = format(i_bits, "b").zfill(self.n_total)
+            used_indexes = [i for i in range(self.n_total) if bitstring[i] == "1"]
+            avail_indexes = [i for i in range(self.n_total) if bitstring[i] == "0"]
+            # n_used = len(used_indexes)
+            n_avail = len(avail_indexes)
+            target_tensor = strassen_tensor.clone()
+            for j in used_indexes:
+                target_tensor -= (
+                    uu_strassen[j].view(-1, 1, 1)
+                    * vv_strassen[j].view(1, -1, 1)
+                    * ww_strassen[j].view(1, 1, -1)
+                )
+
+            for k in avail_indexes:
+                self.state_tensor.append(target_tensor.unsqueeze(0))
+                self.target_action.append(
+                    torch.cat((uu_strassen[k], vv_strassen[k], ww_strassen[k])) + 2
+                )
+                self.reward.append(torch.tensor([-n_avail], dtype=torch.float32))
+                self.scalar.append(torch.tensor([0.0], dtype=torch.float32))
+                self.bit_info.append(bitstring)
+                self.n_demos += 1
+        if max_len:
+            self.state_tensor = self.state_tensor[:max_len]
+            self.target_action = self.target_action[:max_len]
+            self.reward = self.reward[:max_len]
+            self.scalar = self.scalar[:max_len]
+            self.n_demos = max_len
+
+    def __len__(self):
+        return self.n_demos
+
+    @torch.no_grad()
+    def __getitem__(self, idx: int):
+        return (
+            self.state_tensor[idx].to(self.device),
+            self.scalar[idx].to(self.device),
+            self.target_action[idx].to(self.device),
+            self.reward[idx].to(self.device),
+        )
+
+
+# if __name__ == "__main__":
+#     strassen = StrassenDemoDataset()
+#     dl = DataLoader(strassen, batch_size=strassen.n_demos, shuffle=True)
+#     for state_tensors, scalars, target_actions, rewards in dl:
+#         print(target_actions)
+#     pass
