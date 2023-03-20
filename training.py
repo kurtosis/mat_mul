@@ -1,5 +1,3 @@
-from time import time
-
 from model import *
 from synthetic_examples import *
 from utils import *
@@ -63,7 +61,8 @@ def test_single_action():
         g_value = torch.ones(1, device=device).unsqueeze(0)
         g_value = torch.cat([g_value for _ in range(batch_size)], 0)
         for ii in range(max_iters):
-            l_pol, l_val = alpha.train(xx, ss, g_action, g_value)
+            alpha.train()
+            l_pol, l_val = alpha.fwd_train(xx, ss, g_action, g_value)
             ll = l_pol + l_val
             optimizer.zero_grad()
             ll.backward()
@@ -71,6 +70,7 @@ def test_single_action():
             if ii % check_interval == 0:
                 print(f"{ii} : policy: {l_pol} : value: {l_val}")
                 print(f"target {i_action}: {g_action[0]}")
+                alpha.eval()
                 aa, pp, qq = alpha.infer(xx[:1], ss[:1])
                 print(f"output {i_action}: {aa[0, 0]}")
                 print(

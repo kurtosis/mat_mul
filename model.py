@@ -1,4 +1,4 @@
-from math import ceil, sqrt
+from math import ceil
 
 import torch
 from torch import nn
@@ -6,12 +6,9 @@ from torch.nn import functional as F
 from torch.distributions.categorical import Categorical
 
 
-DROPOUT_PROB = 0.2
-
-
 def create_fixed_positional_encoding(n_position: int, n_embedding: int, device: str):
     pe = torch.zeros(n_position, n_embedding, device=device)
-    positions = torch.arange(n_position)  # .unsqueeze(1)
+    positions = torch.arange(n_position)
     denominators = 10000 ** (-torch.arange(0, n_embedding, 2) / n_embedding)
     pe[:, 0::2] = torch.outer(positions, denominators).sin()
     pe[:, 1::2] = torch.outer(positions, denominators).cos()
@@ -35,7 +32,7 @@ class Head(nn.Module):
         q = self.query(x)  # (*, nx, d)
         k = self.key(y)  # (*, ny, d)
         v = self.value(y)  # (*, ny, d)
-        a = q @ k.transpose(-2, -1) * self.d ** -0.5  # (*, nx, ny)
+        a = q @ k.transpose(-2, -1) / (self.d ** 0.5)  # (*, nx, ny)
         if self.causal_mask:
             b = torch.tril(torch.ones_like(a))
             a = a.masked_fill(b == 0, float("-inf"))
@@ -45,21 +42,12 @@ class Head(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(
-        self, nx: int, ny: int, c1: int, c2: int, n_heads=16, d=32, w=4, **kwargs
-    ):
+    def __init__(self, c1: int, c2: int, n_heads=16, d=32, w=4, **kwargs):
         super().__init__()
-        self.nx = nx
-        self.ny = ny
-        self.c1 = c1
-        self.c2 = c2
-        self.n_heads = n_heads
-        self.d = d
-        self.w = w
-        self.heads = nn.ModuleList([Head(c1, c2, d, **kwargs) for _ in range(n_heads)])
-        self.li1 = nn.Linear(n_heads * d, c1)
         self.ln1 = nn.LayerNorm(c1)
         self.ln2 = nn.LayerNorm(c2)
+        self.heads = nn.ModuleList([Head(c1, c2, d, **kwargs) for _ in range(n_heads)])
+        self.li1 = nn.Linear(n_heads * d, c1)
         self.ln3 = nn.LayerNorm(c1)
         self.li2 = nn.Linear(c1, c1 * w)
         self.li3 = nn.Linear(c1 * w, c1)
@@ -83,11 +71,8 @@ class MultiHeadAttention(nn.Module):
 class AttentiveModeBatch(nn.Module):
     def __init__(self, dim_3d: int, c1: int, **kwargs):
         super().__init__()
-        self.c1 = c1
         self.dim_3d = dim_3d
-        self.mha = MultiHeadAttention(
-            2 * self.dim_3d, 2 * self.dim_3d, self.c1, self.c1, **kwargs
-        )
+        self.mha = MultiHeadAttention(c1, c1, **kwargs)
 
     def forward(self, g: list[torch.Tensor]):
         # x1, x2, x3 = x_input
@@ -118,26 +103,16 @@ class Torso(nn.Module):
         super().__init__()
         self.dim_3d = dim_3d
         self.dim_t = dim_t
-        self.dim_s = dim_s
         self.dim_c = dim_c
-        self.n_layers = n_layers
-        self.ln1 = nn.LayerNorm(self.dim_c)
-        self.ln2 = nn.LayerNorm(self.dim_c)
-        self.li1 = nn.ModuleList(
-            [nn.Linear(self.dim_s, self.dim_3d ** 2) for _ in range(3)]
-        )
+        self.li1 = nn.ModuleList([nn.Linear(dim_s, dim_3d ** 2) for _ in range(3)])
         self.li2 = nn.ModuleList(
-            [nn.Linear(self.dim_3d * self.dim_t + 1, self.dim_c) for _ in range(3)]
+            [nn.Linear(dim_3d * dim_t + 1, dim_c) for _ in range(3)]
         )
         self.blocks = nn.Sequential(
-            *[
-                AttentiveModeBatch(self.dim_3d, self.dim_c, **kwargs)
-                for _ in range(n_layers)
-            ]
+            *[AttentiveModeBatch(dim_3d, dim_c, **kwargs) for _ in range(n_layers)]
         )
 
     def forward(self, xx: torch.Tensor, ss: torch.Tensor):
-        # assumes batch size dim!
         # xx (*, dim_t, dim_3d, dim_3d, dim_3d)
         # ss (*, dim_s)
         x1 = xx.permute(0, 2, 3, 4, 1).reshape(
@@ -163,47 +138,27 @@ class Torso(nn.Module):
 
 # Algorithm A.4.a
 class PredictBlock(nn.Module):
-    def __init__(
-        self, n_steps: int, n_feats: int, n_heads: int, dim_m: int, dim_c: int, **kwargs
-    ):
+    def __init__(self, n_feats: int, n_heads: int, dim_c: int, drop_p=0.5, **kwargs):
         super().__init__()
-        self.n_steps = n_steps
-        self.n_feats = n_feats
-        self.n_heads = n_heads
-        self.dim_m = dim_m
-        self.dim_c = dim_c
-        self.ln1 = nn.LayerNorm(self.n_feats * self.n_heads)
-        self.ln2 = nn.LayerNorm(self.n_feats * self.n_heads)
-        self.dropout1 = nn.Dropout(DROPOUT_PROB)
-        self.dropout2 = nn.Dropout(DROPOUT_PROB)
+        self.ln1 = nn.LayerNorm(n_feats * n_heads)
         self.att1 = MultiHeadAttention(
-            self.n_steps,
-            self.n_steps,
-            self.n_feats * self.n_heads,
-            self.n_feats * self.n_heads,
-            n_heads=self.n_heads,
-            causal_mask=True,
+            n_feats * n_heads, n_feats * n_heads, n_heads=n_heads, causal_mask=True,
         )
-        self.att2 = MultiHeadAttention(
-            self.n_steps,
-            self.dim_m,
-            self.n_feats * self.n_heads,
-            self.dim_c,
-            n_heads=self.n_heads,
-        )
+        self.dropout1 = nn.Dropout(drop_p)
+        self.ln2 = nn.LayerNorm(n_feats * n_heads)
+        self.att2 = MultiHeadAttention(n_feats * n_heads, dim_c, n_heads=n_heads,)
+        self.dropout2 = nn.Dropout(drop_p)
 
-    def forward(self, xx: torch.Tensor, ee: torch.Tensor, training: bool):
+    def forward(self, xx: torch.Tensor, ee: torch.Tensor):
         xx = self.ln1(xx)  # (*, n_steps, n_feats*n_heads)
         # Self attention
         cc = self.att1(xx, xx)  # (*, n_steps, n_feats*n_heads)
-        if training:
-            cc = self.dropout1(cc)
+        cc = self.dropout1(cc)
         xx = xx + cc  # (*, n_steps, n_feats*n_heads)
         xx = self.ln2(xx)  # (*, n_steps, n_feats*n_heads)
         # Cross attention
         cc = self.att2(xx, ee)  # (*, n_steps, n_feats*n_heads)
-        if training:
-            cc = self.dropout2(cc)
+        cc = self.dropout2(cc)
         xx = xx + cc  # (*, n_steps, n_feats*n_heads)
         return xx
 
@@ -214,7 +169,6 @@ class PredictActionLogits(nn.Module):
         self,
         n_steps: int,
         n_logits: int,
-        dim_m: int,
         dim_c: int,
         n_feats=64,
         n_heads=32,
@@ -223,13 +177,6 @@ class PredictActionLogits(nn.Module):
         **kwargs
     ):
         super().__init__()
-        self.n_steps = n_steps
-        self.n_logits = n_logits
-        self.dim_m = dim_m
-        self.dim_c = dim_c
-        self.n_feats = n_feats
-        self.n_heads = n_heads
-        self.n_layers = n_layers
         self.emb1 = nn.Embedding(n_logits, n_feats * n_heads)
         self.pos_enc = nn.Parameter(torch.rand(n_steps, n_feats * n_heads))
         pos_enc_fix = create_fixed_positional_encoding(
@@ -237,57 +184,33 @@ class PredictActionLogits(nn.Module):
         )
         self.register_buffer("pos_enc_fix", pos_enc_fix)
         self.blocks = nn.Sequential(
-            *[
-                PredictBlock(n_steps, n_feats, n_heads, dim_m, dim_c)
-                for _ in range(n_layers)
-            ]
+            *[PredictBlock(n_feats, n_heads, dim_c, **kwargs) for _ in range(n_layers)]
         )
         self.li1 = nn.Linear(n_feats * n_heads, n_logits)
 
-    def forward(self, aa: torch.Tensor, ee: torch.Tensor, training=False, **kwargs):
+    def forward(self, aa: torch.Tensor, ee: torch.Tensor, **kwargs):
         # aa (n_steps, n_logits) ; ee (dim_m, dim_c)
         xx = self.emb1(aa)  # (n_steps, n_feats*n_heads)
         xx = (
             xx + self.pos_enc[: xx.shape[1]] + self.pos_enc_fix[: xx.shape[1]]
         )  # (n_steps, n_feats*n_heads)
         for block in self.blocks:
-            xx = block(xx, ee, training)
+            xx = block(xx, ee)
         oo = F.relu(xx)  # (n_steps, n_feats*n_heads)
         oo = self.li1(oo)  # (n_steps, n_logits)
         return oo, xx
 
 
 class PolicyHead(nn.Module):
-    def __init__(
-        self,
-        n_steps: int,
-        n_logits: int,
-        dim_m: int,
-        dim_c: int,
-        n_feats=64,
-        n_heads=32,
-        device="cpu",
-        **kwargs
-    ):
+    def __init__(self, n_steps: int, n_logits: int, dim_c: int, device="cpu", **kwargs):
         super().__init__()
         self.n_steps = n_steps
-        self.n_logits = n_logits
-        self.dim_m = dim_m
-        self.dim_c = dim_c
-        self.n_feats = n_feats
-        self.n_heads = n_heads
         self.device = device
         self.predict_action_logits = PredictActionLogits(
-            self.n_steps,
-            self.n_logits,
-            self.dim_m,
-            self.dim_c,
-            n_feats=n_feats,
-            n_heads=n_heads,
-            **kwargs,
+            n_steps, n_logits, dim_c, **kwargs,
         )
 
-    def train(self, ee: torch.Tensor, gg: torch.Tensor):
+    def fwd_train(self, ee: torch.Tensor, gg: torch.Tensor):
         # ee (B, dim_m, dim_c) ; gg (B, n_steps)
         if self.device == "mps":
             gg_shifted = torch.zeros_like(gg, dtype=torch.long)
@@ -298,11 +221,11 @@ class PolicyHead(nn.Module):
             gg[:, 0] = 0
 
         oo, zz = self.predict_action_logits(
-            gg, ee, training=True,
+            gg, ee
         )  # oo (*, n_steps, n_logits) ; zz (*, n_steps, n_feats*n_heads)
         return oo, zz[:, 0, :]
 
-    def infer(self, ee: torch.Tensor, n_samples=32):
+    def fwd_infer(self, ee: torch.Tensor, n_samples=32):
         batch_size = ee.shape[0]
         aa = torch.zeros(
             batch_size,
@@ -375,28 +298,27 @@ class AlphaTensor(nn.Module):
         **kwargs
     ):
         super().__init__()
-        self.dim_3d = dim_3d
-        self.dim_t = dim_t
-        self.dim_s = dim_s
-        self.dim_c = dim_c
+        # self.dim_3d = dim_3d
+        # self.dim_t = dim_t
+        # self.dim_s = dim_s
+        # self.dim_c = dim_c
         self.n_samples = n_samples
-        self.n_steps = n_steps
+        # self.n_steps = n_steps
         self.n_logits = n_logits
         self.device = device
         self.torso = Torso(dim_3d, dim_t, dim_s, dim_c, **kwargs)
-        self.policy_head = PolicyHead(
-            n_steps, n_logits, 3 * dim_3d ** 2, dim_c, device=device, **kwargs
-        )
+        self.policy_head = PolicyHead(n_steps, n_logits, dim_c, device=device, **kwargs)
         # TO DO: figure out how to run 2048 dim through
         self.value_head = ValueHead(**kwargs)
 
-    def value_risk_mgmt(self, qq: torch.Tensor, uq=0.75):
+    @staticmethod
+    def value_risk_mgmt(qq: torch.Tensor, uq=0.75):
         # qq (batch_size, n)
         # TO DO: can make this int?
         jj = ceil(uq * qq.shape[-1]) - 1
         return torch.mean(qq[:, jj:], dim=-1)
 
-    def train(
+    def fwd_train(
         self,
         xx: torch.Tensor,
         ss: torch.Tensor,
@@ -404,7 +326,7 @@ class AlphaTensor(nn.Module):
         g_value: torch.Tensor,
     ):
         ee = self.torso(xx, ss)  # (3*dim_3d**2, dim_c)
-        oo, zz = self.policy_head.train(
+        oo, zz = self.policy_head.fwd_train(
             ee, g_action
         )  # oo (*, n_steps, n_logits) ; zz (*, n_feats*n_heads)
         l_pol = F.cross_entropy(
@@ -415,9 +337,9 @@ class AlphaTensor(nn.Module):
         l_val = quantile_loss(qq, g_value, device=self.device)
         return l_pol, l_val
 
-    def infer(self, xx: torch.Tensor, ss: torch.Tensor):
+    def fwd_infer(self, xx: torch.Tensor, ss: torch.Tensor):
         ee = self.torso(xx, ss)  # (3*dim_3d**2, dim_c)
-        aa, pp, z1 = self.policy_head.infer(
+        aa, pp, z1 = self.policy_head.fwd_infer(
             ee, self.n_samples
         )  # aa (*, n_samples, n_steps) ; pp (*, n_samples) ; z1 (*, n_feats*n_heads)
         qq = self.value_head(z1)  # (n)

@@ -1,5 +1,3 @@
-import pandas as pd
-
 import torch
 
 from data_generation import *
@@ -26,6 +24,7 @@ alpha = AlphaTensor(
     n_feats=8,
     n_heads=4,
     n_hidden=8,
+    # drop_p=0.1,
     device=device,
 )
 alpha = alpha.to(device)
@@ -38,7 +37,8 @@ for i_epoch in range(n_epochs):
     epoch_loss_pol = 0
     epoch_loss_val = 0
     for states, scalars, target_actions, rewards in dl:
-        loss_pol, loss_val = alpha.train(states, scalars, target_actions, rewards)
+        alpha.train()
+        loss_pol, loss_val = alpha.fwd_train(states, scalars, target_actions, rewards)
         epoch_loss_pol += loss_pol
         epoch_loss_val += loss_val
         loss_combined = weight_pol * loss_pol + weigh_val * loss_val
@@ -49,7 +49,8 @@ for i_epoch in range(n_epochs):
             print(
                 f"epoch: {i_epoch} policy loss: {epoch_loss_pol} value loss {epoch_loss_val}"
             )
-            aa, pp, qq = alpha.infer(states, scalars)
+            alpha.eval()
+            aa, pp, qq = alpha.fwd_infer(states, scalars)
             correct = torch.eq(aa.squeeze(), target_actions)
             print(f"Percent correct= {100*torch.mean(correct.float())}")
             print(f"Baseline= {100*torch.mean((target_actions == 2).float())}")
