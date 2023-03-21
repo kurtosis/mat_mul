@@ -16,15 +16,8 @@ n_samples = 32
 n_steps = 12
 n_quantile = 8
 
-# device = (
-#     "cuda"
-#     if torch.cuda.is_available()
-#     else "mps"
-#     if torch.backends.mps.is_available()
-#     else "cpu"
-# )
 
-device = "mps"
+device = "cpu"
 
 strassen_tensor, strassen_steps = get_strassen_tensor(device)
 

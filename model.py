@@ -138,16 +138,16 @@ class Torso(nn.Module):
 
 # Algorithm A.4.a
 class PredictBlock(nn.Module):
-    def __init__(self, n_feats: int, n_heads: int, dim_c: int, drop_p=0.5, **kwargs):
+    def __init__(self, n_feats: int, n_heads: int, dim_c: int, dropout_p=0.5, **kwargs):
         super().__init__()
         self.ln1 = nn.LayerNorm(n_feats * n_heads)
         self.att1 = MultiHeadAttention(
             n_feats * n_heads, n_feats * n_heads, n_heads=n_heads, causal_mask=True,
         )
-        self.dropout1 = nn.Dropout(drop_p)
+        self.dropout1 = nn.Dropout(dropout_p)
         self.ln2 = nn.LayerNorm(n_feats * n_heads)
         self.att2 = MultiHeadAttention(n_feats * n_heads, dim_c, n_heads=n_heads,)
-        self.dropout2 = nn.Dropout(drop_p)
+        self.dropout2 = nn.Dropout(dropout_p)
 
     def forward(self, xx: torch.Tensor, ee: torch.Tensor):
         xx = self.ln1(xx)  # (*, n_steps, n_feats*n_heads)
@@ -308,7 +308,6 @@ class AlphaTensor(nn.Module):
         self.device = device
         self.torso = Torso(dim_3d, dim_t, dim_s, dim_c, **kwargs)
         self.policy_head = PolicyHead(n_steps, n_logits, dim_c, device=device, **kwargs)
-        # TO DO: figure out how to run 2048 dim through
         self.value_head = ValueHead(**kwargs)
 
     @staticmethod

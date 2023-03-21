@@ -192,11 +192,3 @@ class StrassenDemoDataset(Dataset):
             self.target_action[idx].to(self.device),
             self.reward[idx].to(self.device),
         )
-
-
-# if __name__ == "__main__":
-#     strassen = StrassenDemoDataset()
-#     dl = DataLoader(strassen, batch_size=strassen.n_demos, shuffle=True)
-#     for state_tensors, scalars, target_actions, rewards in dl:
-#         print(target_actions)
-#     pass
