@@ -244,7 +244,7 @@ class PolicyHead(nn.Module):
             oo_s, zz_s = self.predict_action_logits(aa[:, : i + 1], ee)
             distrib = Categorical(logits=oo_s[:, i])
             aa[:, i + 1] = distrib.sample()  # allow to sample 0, but reserve for <SOS>
-            p_i = distrib.probs[torch.arange(batch_size), aa[:, i + 1]]  # (batch_size)
+            p_i = distrib.probs[torch.arange(batch_size*n_samples), aa[:, i + 1]]  # (batch_size)
             pp = torch.mul(pp, p_i)
         return (
             aa[:, 1:].view(batch_size, n_samples, self.n_steps),
@@ -275,7 +275,7 @@ def quantile_loss(qq: torch.Tensor, gg: torch.Tensor, delta=1, device="cpu"):
     n = qq.shape[-1]
     # TO DO: store tau in buffer?
     tau = (torch.arange(n, dtype=torch.float32, device=device) + 0.5) / n  # (n)
-    hh = F.huber_loss(gg, qq, reduction="none", delta=delta)  # (n)
+    hh = F.huber_loss(gg.expand(-1, n), qq, reduction="none", delta=delta)  # (n)
     dd = gg - qq  # (n)
     # TO DO: is the sign of dd correct?
     kk = torch.abs(tau - (dd > 0).float())  # (n)
@@ -291,7 +291,6 @@ class AlphaTensor(nn.Module):
         dim_t=8,
         dim_s=1,
         dim_c=16,
-        n_samples=32,
         n_steps=12,
         n_logits=3,
         device="cpu",
@@ -302,7 +301,7 @@ class AlphaTensor(nn.Module):
         # self.dim_t = dim_t
         # self.dim_s = dim_s
         # self.dim_c = dim_c
-        self.n_samples = n_samples
+        # self.n_samples = n_samples
         # self.n_steps = n_steps
         self.n_logits = n_logits
         self.device = device
@@ -336,10 +335,10 @@ class AlphaTensor(nn.Module):
         l_val = quantile_loss(qq, g_value, device=self.device)
         return l_pol, l_val
 
-    def fwd_infer(self, xx: torch.Tensor, ss: torch.Tensor):
+    def fwd_infer(self, xx: torch.Tensor, ss: torch.Tensor, n_samples=32):
         ee = self.torso(xx, ss)  # (3*dim_3d**2, dim_c)
         aa, pp, z1 = self.policy_head.fwd_infer(
-            ee, self.n_samples
+            ee, n_samples
         )  # aa (*, n_samples, n_steps) ; pp (*, n_samples) ; z1 (*, n_feats*n_heads)
         qq = self.value_head(z1)  # (n)
         qq = self.value_risk_mgmt(qq)  # (1)

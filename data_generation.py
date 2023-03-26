@@ -2,6 +2,7 @@ import os.path
 from pathlib import Path
 from typing import List, Tuple
 
+from torch.distributions.categorical import Categorical
 from torch.utils.data import Dataset, DataLoader
 
 from synthetic_examples import *
@@ -13,7 +14,14 @@ def factors_to_tensor(factors: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
     """Convert the factor triplet defining an action to their outer product tensor.
     """
     uu, vv, ww = factors
-    tensor_action = uu.view(-1, 1, 1) * vv.view(1, -1, 1) * ww.view(1, 1, -1)
+    if uu.dim() == 1:
+        tensor_action = uu.view(-1, 1, 1) * vv.view(1, -1, 1) * ww.view(1, 1, -1)
+    else:
+        tensor_action = (
+            uu.unsqueeze(-1).unsqueeze(-1)
+            * vv.unsqueeze(-1).unsqueeze(-3)
+            * ww.unsqueeze(-2).unsqueeze(-3)
+        )
     return tensor_action
 
 
@@ -28,29 +36,36 @@ def take_actions(
     return target_tensor
 
 
+def factor_sample(size, values=[-1, 0, 1], probs=[0.15, 0.7, 0.15]):
+    vals = torch.tensor(values)
+    distrib = Categorical(torch.tensor(probs))
+    idx_sample = distrib.sample(torch.Size([size]))
+    return vals[idx_sample]
+
+
 class SyntheticDemoDataset(Dataset):
     """Create a set of synthetic demonstrations and save to disk.
     """
 
     def __init__(
         self,
-        max_rank: int,
+        max_actions: int,
         n_demos: int,
         dim_t: int,
         dim_3d: int,
-        distrib: torch.distributions.categorical.Categorical,
-        device,
+        device: str,
         save_dir=SAVE_DIR_SYNTH_DEMOS,
     ):
-        self.max_rank = max_rank
+        super().__init__()
+        self.max_actions = max_actions
         self.n_demos = n_demos
         self.dim_t = dim_t
         self.dim_3d = dim_3d
-        self.distrib = distrib
         self.device = device
         self.save_dir = save_dir
         Path(self.save_dir).mkdir(parents=True, exist_ok=True)
         n_demos_stored = len(list(Path(self.save_dir).glob("target_tensor_*.pt")))
+        # create demonstrations and save to disk
         if n_demos_stored < n_demos:
             self.len_data = n_demos_stored
             for i_demo, (action_list, target_tensor) in enumerate(
@@ -64,22 +79,22 @@ class SyntheticDemoDataset(Dataset):
                     target_tensor,
                     os.path.join(self.save_dir, f"target_tensor_{self.len_data}.pt"),
                 )
-            self.len_data += 1
+                self.len_data += 1
         else:
             self.len_data = n_demos
 
     def __len__(self):
-        return self.len_data * self.max_rank
+        return self.len_data * self.max_actions
 
     @torch.no_grad()
     def __getitem__(self, idx: int):
-        i = idx // self.max_rank
-        j = idx % self.max_rank
+        i = idx // self.max_actions
+        j = idx % self.max_actions
         action_list = torch.load(os.path.join(self.save_dir, f"action_list_{i}.pt"))
         target_tensor = torch.load(
             os.path.join(self.save_dir, f"target_tensor_{i}.pt"),
         )
-        if j != self.max_rank - 1:
+        if j != self.max_actions - 1:
             actions = action_list[j + 1 :]
             target_tensor = take_actions(actions, target_tensor)
         action = action_list[j]
@@ -101,9 +116,10 @@ class SyntheticDemoDataset(Dataset):
                     ),
                 ]
             )
-        scalar = torch.tensor(self.max_rank - j).unsqueeze(-1).float()
-        policy = torch.cat(action)
-        reward = torch.tensor([-(j + 1)])
+        scalar = torch.tensor(self.max_actions - j).unsqueeze(-1).float()
+        # policy = torch.cat(action)
+        policy = action
+        reward = torch.tensor([-(j + 1)], dtype=torch.float32)
         return (
             target_tensor.to(self.device),
             scalar.to(self.device),
@@ -116,18 +132,19 @@ class SyntheticDemoDataset(Dataset):
         for _ in range(n_demos_needed):
             target_tensor = torch.zeros(self.dim_3d, self.dim_3d, self.dim_3d)
             action_list = []
-            for i in range(self.max_rank):
+            for i in range(self.max_actions):
                 valid_action = False
                 while not valid_action:
-                    uu = self.distrib.sample(torch.Size([self.dim_3d]))
-                    vv = self.distrib.sample(torch.Size([self.dim_3d]))
-                    ww = self.distrib.sample(torch.Size([self.dim_3d]))
+                    uu = factor_sample(self.dim_3d)
+                    vv = factor_sample(self.dim_3d)
+                    ww = factor_sample(self.dim_3d)
+
                     tensor_update = (
                         uu.view(-1, 1, 1) * vv.view(1, -1, 1) * ww.view(1, 1, -1)
                     )
                     if not (tensor_update == 0).all():
                         valid_action = True
-                        action_list.append((uu, vv, ww))
+                        action_list.append(torch.cat((uu, vv, ww)) + 2)
                         target_tensor += tensor_update
             yield action_list, target_tensor
 

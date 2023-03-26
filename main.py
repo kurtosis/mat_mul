@@ -5,6 +5,7 @@ from time import time
 from model import *
 from data_generation import *
 from strassen_training import *
+from synthetic_training import *
 from utils import *
 
 
@@ -25,7 +26,7 @@ def main():
     parser.add_argument("--n_heads", type=int, default=4)
     parser.add_argument("--n_hidden", type=int, default=8)
     parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--task", type=str, default="strassen")
+    parser.add_argument("--task", type=str, default="synthetic")
     args = parser.parse_args()
 
     alpha = AlphaTensor(
@@ -49,6 +50,8 @@ def main():
 
     if args.task == "strassen":
         train_strassen(alpha, optimizer)
+    elif args.task == "synthetic":
+        train_synthetic(alpha, optimizer)
 
 
 if __name__ == "__main__":
