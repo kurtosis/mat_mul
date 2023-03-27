@@ -29,29 +29,29 @@ def main():
     parser.add_argument("--task", type=str, default="synthetic")
     args = parser.parse_args()
 
-    alpha = AlphaTensor(
-        args.dim_3d,
-        args.dim_t,
-        args.dim_s,
-        args.dim_c,
-        args.n_samples,
-        args.n_steps,
-        args.n_logits,
-        n_feats=args.n_feats,
-        n_heads=args.n_heads,
-        n_hidden=args.n_hidden,
-        dropout_p=args.dropout_p,
-        device=args.device,
-    )
-    alpha.to(args.device)
-    optimizer = torch.optim.AdamW(alpha.parameters(), lr=args.lr)
-
-    print_params(alpha)
+    # alpha = AlphaTensor(
+    #     args.dim_3d,
+    #     args.dim_t,
+    #     args.dim_s,
+    #     args.dim_c,
+    #     args.n_steps,
+    #     args.n_logits,
+    #     n_feats=args.n_feats,
+    #     n_heads=args.n_heads,
+    #     n_hidden=args.n_hidden,
+    #     dropout_p=args.dropout_p,
+    #     device=args.device,
+    # )
+    # alpha.to(args.device)
+    # optimizer = torch.optim.AdamW(alpha.parameters(), lr=args.lr)
+    #
+    # print_params(alpha)
 
     if args.task == "strassen":
-        train_strassen(alpha, optimizer)
+        pass
+        # train_strassen(alpha, optimizer)
     elif args.task == "synthetic":
-        train_synthetic(alpha, optimizer)
+        SyntheticDemoTrainingApp(args).main()
 
 
 if __name__ == "__main__":

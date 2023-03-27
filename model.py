@@ -297,12 +297,7 @@ class AlphaTensor(nn.Module):
         **kwargs
     ):
         super().__init__()
-        # self.dim_3d = dim_3d
-        # self.dim_t = dim_t
-        # self.dim_s = dim_s
-        # self.dim_c = dim_c
-        # self.n_samples = n_samples
-        # self.n_steps = n_steps
+        self.dim_3d = dim_3d
         self.n_logits = n_logits
         self.device = device
         self.torso = Torso(dim_3d, dim_t, dim_s, dim_c, **kwargs)
@@ -323,6 +318,9 @@ class AlphaTensor(nn.Module):
         g_action: torch.Tensor,
         g_value: torch.Tensor,
     ):
+        """Compare single action predictions to target actions and values.
+        Returns policy (action) and value losses.
+        """
         ee = self.torso(xx, ss)  # (3*dim_3d**2, dim_c)
         oo, zz = self.policy_head.fwd_train(
             ee, g_action
@@ -336,6 +334,9 @@ class AlphaTensor(nn.Module):
         return l_pol, l_val
 
     def fwd_infer(self, xx: torch.Tensor, ss: torch.Tensor, n_samples=32):
+        """Generate trajectories from input state.
+        Returns trajectory, probability, and value.
+        """
         ee = self.torso(xx, ss)  # (3*dim_3d**2, dim_c)
         aa, pp, z1 = self.policy_head.fwd_infer(
             ee, n_samples
