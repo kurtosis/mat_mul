@@ -1,23 +1,19 @@
-import datetime
 from argparse import ArgumentParser
+import datetime
+import hashlib
+import json
 import logging
 
 # import logging.handlers
 import os
 import sys
 
-import torch
-
 # import torch
-from torch.utils.data import random_split
-
+from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
 
 from data_generation import *
 from model import *
-from synthetic_examples import *
-
-# from utils import *
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
@@ -36,7 +32,7 @@ class TrainingApp:
         parser.add_argument("--max_len", type=int, default=None)
         parser.add_argument("--batch_size", type=int, default=256)
         parser.add_argument("--dim_3d", type=int, default=4)
-        parser.add_argument("--dim_t", type=int, default=1)
+        parser.add_argument("--dim_t", type=int, default=2)
         parser.add_argument("--dim_s", type=int, default=1)
         parser.add_argument("--dim_c", type=int, default=8)
         parser.add_argument("--n_samples", type=int, default=1)
@@ -55,11 +51,19 @@ class TrainingApp:
         parser.add_argument("--tb_prefix", type=str, default="synth_demo")
         parser.add_argument(
             "comment",
+            type=str,
             help="Comment suffix for Tensorboard run",
             nargs="?",
             default="synth",
         )
-
+        parser.add_argument(
+            "model_file",
+            type=str,
+            help="File name to load model params from.",
+            nargs="?",
+            default=None,
+            # default="synth_2023-03-29_10.31.07_synth_1170.pt"
+        )
         self.args = parser.parse_args(sys_argv)
         self.time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H.%M.%S")
         self.training_samples_count = 0
@@ -93,27 +97,77 @@ class TrainingApp:
 
     def init_tensorboard_writers(self):
         if self.trn_writer is None:
-            log_dir = os.path.join("runs", self.args.tb_prefix, self.time_str)
+            log_dir = Path("runs").joinpath(self.args.tb_prefix)
             self.trn_writer = SummaryWriter(
-                log_dir=log_dir + "-trn-" + self.args.comment
+                log_dir=log_dir.joinpath(self.time_str + "-trn-" + self.args.comment)
             )
             self.val_writer = SummaryWriter(
-                log_dir=log_dir + "-val-" + self.args.comment
+                log_dir=log_dir.joinpath(self.time_str + "-val-" + self.args.comment)
+                # log_dir=log_dir + "-val-" + self.args.comment
             )
 
-    def log_metrics(self):
+    def log_metrics(self, *args, **kwargs):
         pass
+
+    def save_model(self, type_str, i_epoch):
+        file_path = Path("data_unversioned").joinpath(
+            "models",
+            self.args.tb_prefix,
+            f"{type_str}_{self.time_str}_{self.args.comment}_{self.training_samples_count}.pt",
+        )
+        Path.mkdir(file_path.parent, mode=0o755, exist_ok=True)
+        model = self.model
+        if isinstance(model, torch.nn.DataParallel):
+            model = model.module
+        state = {
+            "model_name": type(model).__name__,
+            # "optimizer_state": self.optimizer.state_dict(),
+            "optimizer_name": type(self.optimizer).__name__,
+            "epoch": i_epoch,
+            "training_samples_count": self.training_samples_count,
+            "dim_3d": model.dim_3d,
+            "device": model.device,
+            "n_logits": model.n_logits,
+        }
+        torch.save(model.state_dict(), file_path)
+        # save parameters in a json file
+        state_file_path = Path("data_unversioned").joinpath(
+            "models",
+            self.args.tb_prefix,
+            f"{type_str}_{self.time_str}_{self.args.comment}_{self.training_samples_count}.json",
+        )
+        with open(state_file_path, "w") as f:
+            json.dump(state, f)
+        log.debug(f"Saved model params to {file_path}")
+        with open(file_path, "rb") as f:
+            log.info(f"SHA!: {hashlib.sha1(f.read()).hexdigest()}")
+
+    def load_model(self, model_file):
+        file_path = Path("data_unversioned").joinpath(
+            "models",
+            self.args.tb_prefix,
+            model_file,
+        )
+        # d = torch.load(self.cli_args.finetune, map_location="cpu")
+        self.model.load_state_dict(torch.load(file_path))
+        self.model.eval()
 
     def main(self):
         pass
 
 
 class SyntheticDemoTrainingApp(TrainingApp):
-    def __init__(self, sys_argv=None):
+    def __init__(self):
         super().__init__()
 
     def init_dl(self):
-        demos = SyntheticDemoDataset(1, self.args.n_demos, 1, 4, self.args.device)
+        demos = SyntheticDemoDataset(
+            self.args.dim_t,
+            self.args.n_demos,
+            self.args.dim_t,
+            self.args.dim_3d,
+            self.args.device,
+        )
         demos_train, demos_test = random_split(demos, [0.9, 0.1])
         dl_train = DataLoader(
             demos_train, batch_size=self.args.batch_size, shuffle=True
@@ -141,6 +195,11 @@ class SyntheticDemoTrainingApp(TrainingApp):
         return new_states, scalars + 1, best_samples
 
     def main(self):
+        if self.args.model_file is not None:
+            print("loading model")
+            self.load_model(self.args.model_file)
+        else:
+            print("NOT loading model")
         dl_train, dl_test = self.init_dl()
         for i_epoch in range(self.args.n_epochs):
             epoch_loss_pol = 0
@@ -182,12 +241,13 @@ class SyntheticDemoTrainingApp(TrainingApp):
                 epoch_loss_pol /= len(dl_test.dataset)
                 epoch_loss_val /= len(dl_test.dataset)
                 self.log_metrics(i_epoch, "val", epoch_loss_pol, epoch_loss_val)
+                self.save_model("synth", i_epoch)
                 print(
                     f"VAL epoch: {i_epoch} policy loss: {epoch_loss_pol} "
                     f"value loss {epoch_loss_val}"
                 )
             # Solution search printout
-            if i_epoch % self.args.n_act == 0:
+            if i_epoch + 1 % self.args.n_act == 0:
                 self.model.eval()
                 lowest_rank = torch.tensor(self.model.dim_3d**3)
                 num_solutions_found = 0

@@ -68,7 +68,7 @@ def get_strassen_tensor(device: str):
 
 
 if __name__ == "__main__":
-    device = "cpu"
+    # device = "cpu"
     # uu_strassen, vv_strassen, ww_strassen = get_strassen_factors(device)
     # strassen_tensor, action_list = get_strassen_tensor(device)
     pass

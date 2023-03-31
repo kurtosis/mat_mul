@@ -1,51 +1,16 @@
-import os.path
 from pathlib import Path
 from typing import List, Tuple
 
+import torch
 from torch.distributions.categorical import Categorical
-from torch.utils.data import Dataset, DataLoader
-
-from synthetic_examples import *
-
-SAVE_DIR_SYNTH_DEMOS = str(Path.home() / "./data/synthetic_demos")
+from torch.utils.data import Dataset
 
 
-def factors_to_tensor(factors: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
-    """Convert the factor triplet defining an action to their outer product tensor.
-    """
-    uu, vv, ww = factors
-    if uu.dim() == 1:
-        tensor_action = uu.view(-1, 1, 1) * vv.view(1, -1, 1) * ww.view(1, 1, -1)
-    else:
-        tensor_action = (
-            uu.unsqueeze(-1).unsqueeze(-1)
-            * vv.unsqueeze(-1).unsqueeze(-3)
-            * ww.unsqueeze(-2).unsqueeze(-3)
-        )
-    return tensor_action
-
-
-def take_actions(
-    action_list: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
-    target_tensor: torch.Tensor,
-):
-    """Given initial tensor state and action list, update the tensor by
-    taking the actions"""
-    for action in action_list:
-        target_tensor = target_tensor - factors_to_tensor(action)
-    return target_tensor
-
-
-def factor_sample(size, values=[-1, 0, 1], probs=[0.15, 0.7, 0.15]):
-    vals = torch.tensor(values)
-    distrib = Categorical(torch.tensor(probs))
-    idx_sample = distrib.sample(torch.Size([size]))
-    return vals[idx_sample]
+SAVE_DIR_SYNTH_DEMOS = Path("data_unversioned/synthetic_demos")
 
 
 class SyntheticDemoDataset(Dataset):
-    """Create a set of synthetic demonstrations and save to disk.
-    """
+    """Create a set of synthetic demonstrations and save to disk."""
 
     def __init__(
         self,
@@ -54,6 +19,9 @@ class SyntheticDemoDataset(Dataset):
         dim_t: int,
         dim_3d: int,
         device: str,
+        values=(-1, 0, 1),
+        probs=(0.15, 0.7, 0.15),
+        overwrite=True,
         save_dir=SAVE_DIR_SYNTH_DEMOS,
     ):
         super().__init__()
@@ -61,10 +29,19 @@ class SyntheticDemoDataset(Dataset):
         self.n_demos = n_demos
         self.dim_t = dim_t
         self.dim_3d = dim_3d
+        self.values = torch.tensor(values)
+        self.probs = torch.tensor(probs)
         self.device = device
-        self.save_dir = save_dir
-        Path(self.save_dir).mkdir(parents=True, exist_ok=True)
-        n_demos_stored = len(list(Path(self.save_dir).glob("target_tensor_*.pt")))
+        self.save_dir = Path(save_dir)
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        if overwrite:
+            for f in self.save_dir.glob("target_tensor_*.pt"):
+                f.unlink()
+            for f in self.save_dir.glob("action_list_*.pt"):
+                f.unlink()
+            n_demos_stored = 0
+        else:
+            n_demos_stored = len(list(self.save_dir.glob("target_tensor_*.pt")))
         # create demonstrations and save to disk
         if n_demos_stored < n_demos:
             self.len_data = n_demos_stored
@@ -73,11 +50,11 @@ class SyntheticDemoDataset(Dataset):
             ):
                 torch.save(
                     action_list,
-                    os.path.join(self.save_dir, f"action_list_{self.len_data}.pt"),
+                    self.save_dir.joinpath(f"action_list_{self.len_data}.pt"),
                 )
                 torch.save(
                     target_tensor,
-                    os.path.join(self.save_dir, f"target_tensor_{self.len_data}.pt"),
+                    self.save_dir.joinpath(f"target_tensor_{self.len_data}.pt"),
                 )
                 self.len_data += 1
         else:
@@ -88,22 +65,24 @@ class SyntheticDemoDataset(Dataset):
 
     @torch.no_grad()
     def __getitem__(self, idx: int):
-        i = idx // self.max_actions
-        j = idx % self.max_actions
-        action_list = torch.load(os.path.join(self.save_dir, f"action_list_{i}.pt"))
+        idx_demo = idx // self.max_actions
+        idx_action = idx % self.max_actions
+        action_list = torch.load(self.save_dir.joinpath(f"action_list_{idx_demo}.pt"))
         target_tensor = torch.load(
-            os.path.join(self.save_dir, f"target_tensor_{i}.pt"),
+            self.save_dir.joinpath(f"target_tensor_{idx_demo}.pt"),
         )
-        if j != self.max_actions - 1:
-            actions = action_list[j + 1 :]
-            target_tensor = take_actions(actions, target_tensor)
-        action = action_list[j]
+        if idx_action != self.max_actions - 1:
+            actions = action_list[idx_action + 1 :]
+            target_tensor = self._take_actions(actions, target_tensor)
+        action = action_list[idx_action]
         target_tensor = torch.stack(
             [
                 target_tensor,
                 *(
-                    factors_to_tensor(t)
-                    for t in reversed(action_list[j + 1 : j + self.dim_t])
+                    self._action_to_tensor(action)
+                    for action in reversed(
+                        action_list[idx_action + 1 : idx_action + self.dim_t]
+                    )
                 ),
             ]
         )
@@ -112,14 +91,15 @@ class SyntheticDemoDataset(Dataset):
                 [
                     target_tensor,
                     torch.zeros(
-                        self.dim_t - len(target_tensor), *target_tensor.shape[1:],
+                        self.dim_t - len(target_tensor),
+                        *target_tensor.shape[1:],
                     ),
                 ]
             )
-        scalar = torch.tensor(self.max_actions - j).unsqueeze(-1).float()
+        scalar = torch.tensor(self.max_actions - idx_action).unsqueeze(-1).float()
         # policy = torch.cat(action)
         policy = action
-        reward = torch.tensor([-(j + 1)], dtype=torch.float32)
+        reward = torch.tensor([-(idx_action + 1)], dtype=torch.float32)
         return (
             target_tensor.to(self.device),
             scalar.to(self.device),
@@ -135,9 +115,9 @@ class SyntheticDemoDataset(Dataset):
             for i in range(self.max_actions):
                 valid_action = False
                 while not valid_action:
-                    uu = factor_sample(self.dim_3d)
-                    vv = factor_sample(self.dim_3d)
-                    ww = factor_sample(self.dim_3d)
+                    uu = self._factor_sample()
+                    vv = self._factor_sample()
+                    ww = self._factor_sample()
 
                     tensor_update = (
                         uu.view(-1, 1, 1) * vv.view(1, -1, 1) * ww.view(1, 1, -1)
@@ -147,6 +127,27 @@ class SyntheticDemoDataset(Dataset):
                         action_list.append(torch.cat((uu, vv, ww)) + 2)
                         target_tensor += tensor_update
             yield action_list, target_tensor
+
+    def _take_actions(
+        self,
+        # action_list: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+        action_list: List[torch.Tensor],
+        target_tensor: torch.Tensor,
+    ):
+        """Given initial tensor state and action list, update the tensor by
+        taking the actions"""
+        for action in action_list:
+            target_tensor = target_tensor - self._action_to_tensor(action)
+        return target_tensor
+
+    def _action_to_tensor(self, action: torch.Tensor):
+        factors = (action - 2).split(self.dim_3d, dim=-1)
+        return factors_to_tensor(factors)
+
+    def _factor_sample(self):
+        distrib = Categorical(self.probs)
+        idx_sample = distrib.sample(torch.Size([self.dim_3d]))
+        return self.values[idx_sample]
 
 
 class StrassenDemoDataset(Dataset):
@@ -168,7 +169,7 @@ class StrassenDemoDataset(Dataset):
         self.bit_info = []
         strassen_tensor, action_list = get_strassen_tensor(self.device)
         uu_strassen, vv_strassen, ww_strassen = get_strassen_factors(self.device)
-        for i_bits in range(2 ** self.n_total):
+        for i_bits in range(2**self.n_total):
             bitstring = format(i_bits, "b").zfill(self.n_total)
             used_indexes = [i for i in range(self.n_total) if bitstring[i] == "1"]
             avail_indexes = [i for i in range(self.n_total) if bitstring[i] == "0"]
@@ -209,3 +210,78 @@ class StrassenDemoDataset(Dataset):
             self.target_action[idx].to(self.device),
             self.reward[idx].to(self.device),
         )
+
+
+def get_strassen_factors(device: str):
+    uu_strassen = torch.tensor(
+        [
+            [1, 0, 0, 1],
+            [0, 0, 1, 1],
+            [1, 0, 0, 0],
+            [0, 0, 0, 1],
+            [1, 1, 0, 0],
+            [-1, 0, 1, 0],
+            [0, 1, 0, -1],
+        ],
+        device=device,
+    )
+    vv_strassen = torch.tensor(
+        [
+            [1, 0, 0, 1],
+            [1, 0, 0, 0],
+            [0, 1, 0, -1],
+            [-1, 0, 1, 0],
+            [0, 0, 0, 1],
+            [1, 1, 0, 0],
+            [0, 0, 1, 1],
+        ],
+        device=device,
+    )
+    ww_strassen = torch.tensor(
+        [
+            [1, 0, 0, 1],
+            [0, 0, 1, -1],
+            [0, 1, 0, 1],
+            [1, 0, 1, 0],
+            [-1, 1, 0, 0],
+            [0, 0, 0, 1],
+            [1, 0, 0, 0],
+        ],
+        device=device,
+    )
+    return uu_strassen, vv_strassen, ww_strassen
+
+
+def get_strassen_tensor(device: str):
+    uu_strassen, vv_strassen, ww_strassen = get_strassen_factors(device)
+    return factors_to_demo(uu_strassen, vv_strassen, ww_strassen, device)
+
+
+def factors_to_demo(uu: torch.Tensor, vv: torch.Tensor, ww: torch.Tensor, device: str):
+    """Converts a triplet of factor lists to the tensor and action_list.
+    Assumes factor values are in {-1, 0, 1} and shifts factor tokens to start at 1,
+    with 0 reserved for start of sequence token."""
+    mult_tensor = torch.zeros((4, 4, 4), device=device)
+    for i in torch.arange(uu.shape[0]):
+        # mul_tensor += torch.einsum("p,qr->pqr", uu[i], torch.outer(vv[i], ww[i]))
+        mult_tensor += (
+            uu[i].view(-1, 1, 1) * vv[i].view(1, -1, 1) * ww[i].view(1, 1, -1)
+        )
+    # convert to steps/actions
+    action_list = torch.cat((uu, vv, ww), dim=1)
+    action_list += 2
+    return mult_tensor, action_list
+
+
+def factors_to_tensor(factors: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
+    """Convert the factor triplet defining an action to their outer product tensor."""
+    uu, vv, ww = factors
+    if uu.dim() == 1:
+        tensor_action = uu.view(-1, 1, 1) * vv.view(1, -1, 1) * ww.view(1, 1, -1)
+    else:
+        tensor_action = (
+            uu.unsqueeze(-1).unsqueeze(-1)
+            * vv.unsqueeze(-1).unsqueeze(-3)
+            * ww.unsqueeze(-2).unsqueeze(-3)
+        )
+    return tensor_action

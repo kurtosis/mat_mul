@@ -1,16 +1,14 @@
-import torch
-
 from data_generation import *
 from model import *
 from synthetic_training import TrainingApp
-from utils import *
+
+from torch.utils.data import DataLoader
 
 
 class StrassenTrainingApp(TrainingApp):
-    def __init__(self, sys_argv=None):
+    def __init__(self):
         super().__init__()
-        strassen = StrassenDemoDataset(max_len=self.args.max_len)
-        dl = DataLoader(strassen, batch_size=strassen.n_demos, shuffle=True)
+        self.dl = self.init_dl()
 
     def init_dl(self):
         strassen = StrassenDemoDataset(max_len=self.args.max_len)
