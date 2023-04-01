@@ -3,12 +3,9 @@ import datetime
 import hashlib
 import json
 import logging
-
-# import logging.handlers
 import os
 import sys
 
-# import torch
 from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
 
@@ -26,26 +23,27 @@ class TrainingApp:
         if sys_argv is None:
             sys_argv = sys.argv[1:]
         parser = ArgumentParser()
-        parser.add_argument("--lr", type=float, default=5e-4)
+        parser.add_argument("--lr", type=float, default=1e-3)
         parser.add_argument("--dropout_p", type=float, default=0.5)
         parser.add_argument("--max_iters", type=int, default=10)
         parser.add_argument("--max_len", type=int, default=None)
+        parser.add_argument("--max_actions", type=int, default=1)
         parser.add_argument("--batch_size", type=int, default=256)
         parser.add_argument("--dim_3d", type=int, default=4)
-        parser.add_argument("--dim_t", type=int, default=2)
+        parser.add_argument("--dim_t", type=int, default=1)
         parser.add_argument("--dim_s", type=int, default=1)
         parser.add_argument("--dim_c", type=int, default=8)
-        parser.add_argument("--n_samples", type=int, default=1)
+        parser.add_argument("--n_samples", type=int, default=4)
         parser.add_argument("--n_steps", type=int, default=12)
         parser.add_argument("--n_logits", type=int, default=4)
         parser.add_argument("--n_feats", type=int, default=8)
         parser.add_argument("--n_heads", type=int, default=4)
         parser.add_argument("--n_hidden", type=int, default=8)
         parser.add_argument("--device", type=str, default="cpu")
-        parser.add_argument("--n_demos", type=int, default=100)
+        parser.add_argument("--n_demos", type=int, default=1000)
         parser.add_argument("--n_epochs", type=int, default=100)
-        parser.add_argument("--n_print", type=int, default=1)
-        parser.add_argument("--n_act", type=int, default=1)
+        parser.add_argument("--n_print", type=int, default=2)
+        parser.add_argument("--n_act", type=int, default=10)
         parser.add_argument("--weight_pol", type=int, default=1)
         parser.add_argument("--weigh_val", type=int, default=0)
         parser.add_argument("--tb_prefix", type=str, default="synth_demo")
@@ -148,7 +146,6 @@ class TrainingApp:
             self.args.tb_prefix,
             model_file,
         )
-        # d = torch.load(self.cli_args.finetune, map_location="cpu")
         self.model.load_state_dict(torch.load(file_path))
         self.model.eval()
 
@@ -183,23 +180,31 @@ class SyntheticDemoTrainingApp(TrainingApp):
         writer.add_scalar("loss_value", epoch_loss_val, self.training_samples_count)
 
     def _take_action(self, states, scalars):
-        aa, pp, qq = self.model.fwd_infer(
-            states, scalars, n_samples=self.args.n_samples
-        )
+        """Input: current environment: states and scalars
+        Output: new environment: states and scalars, best ranks, actions"""
+        aa, pp, qq = self.model.fwd_infer(states, scalars, n_samples=1)
         aa[aa == 0] = 2  # hack to avoid choosing <SOS> token
-        uu, vv, ww = torch.split(aa.squeeze() - 2, 4, dim=-1)
+        uu, vv, ww = torch.split(aa.squeeze() - 2, self.args.dim_3d, dim=-1)
         action_tensor = factors_to_tensor((uu, vv, ww))
-        new_states = states - action_tensor
-        rank_ubs = torch.sum(new_states != 0, [-1, -2, -3], dtype=torch.int32)
+        new_head = states[:, 0] - action_tensor
+        new_head = new_head.unsqueeze(dim=1)
+        new_states = torch.cat((new_head, states), dim=1)
+        new_states = new_states[:, :-1]
+        grouped_samples = new_head.view(
+            -1,
+            self.args.n_samples,
+            self.args.dim_3d,
+            self.args.dim_3d,
+            self.args.dim_3d,
+        )
+        rank_ubs = torch.sum(grouped_samples != 0, [-1, -2, -3], dtype=torch.int32)
         best_samples = torch.min(rank_ubs, -1)
-        return new_states, scalars + 1, best_samples
+        return new_states, scalars + 1, best_samples, (uu, vv, ww)
 
     def main(self):
         if self.args.model_file is not None:
-            print("loading model")
+            print(f"loading model {self.args.model_file}")
             self.load_model(self.args.model_file)
-        else:
-            print("NOT loading model")
         dl_train, dl_test = self.init_dl()
         for i_epoch in range(self.args.n_epochs):
             epoch_loss_pol = 0
@@ -247,20 +252,29 @@ class SyntheticDemoTrainingApp(TrainingApp):
                     f"value loss {epoch_loss_val}"
                 )
             # Solution search printout
-            if i_epoch + 1 % self.args.n_act == 0:
-                self.model.eval()
-                lowest_rank = torch.tensor(self.model.dim_3d**3)
-                num_solutions_found = 0
-                for states, scalars, _, _ in dl_test:
-                    _, _, best_samples = self._take_action(states, scalars)
-                    lowest_rank = torch.min(lowest_rank, torch.min(best_samples.values))
-                    num_solutions_found += torch.sum(best_samples.values == 0)
-                if num_solutions_found > 0:
-                    print(
-                        f"E{i_epoch}: Found {num_solutions_found} solutions out of {len(dl_test.dataset)}"
-                    )
-                else:
-                    print(f"E{i_epoch} : lowest rank found = {lowest_rank}")
+            if i_epoch % self.args.n_act == 0:
+                for dl, val in [(dl_train, "train"), (dl_test, "test")]:
+                    print(val)
+                    self.model.eval()
+                    lowest_rank = torch.tensor(self.model.dim_3d**3)
+                    num_solutions_found = 0
+                    for states, scalars, _, _ in dl:
+                        states = states.repeat(self.args.n_samples, 1, 1, 1, 1)
+                        scalars = scalars.repeat(self.args.n_samples, 1)
+                        for i in range(self.args.max_actions):
+                            states, scalars, best_samples, _ = self._take_action(
+                                states, scalars
+                            )
+                            lowest_rank = torch.min(
+                                lowest_rank, torch.min(best_samples.values)
+                            )
+                            num_solutions_found += torch.sum(best_samples.values == 0)
+                    if num_solutions_found > 0:
+                        print(
+                            f"E{i_epoch}: Found {num_solutions_found} solutions out of {len(dl.dataset)}"
+                        )
+                    else:
+                        print(f"E{i_epoch} : lowest rank found = {lowest_rank}")
 
 
 if __name__ == "__main__":
