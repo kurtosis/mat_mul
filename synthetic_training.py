@@ -23,7 +23,9 @@ class TrainingApp:
         if sys_argv is None:
             sys_argv = sys.argv[1:]
         parser = ArgumentParser()
-        parser.add_argument("--lr", type=float, default=1e-3)
+        parser.add_argument("--lr_initial", type=float, default=1e-3)
+        parser.add_argument("--lr_final", type=float, default=1e-4)
+        parser.add_argument("--lr_decay_epochs", type=int, default=10)
         parser.add_argument("--dropout_p", type=float, default=0.5)
         parser.add_argument("--max_iters", type=int, default=10)
         parser.add_argument("--max_len", type=int, default=None)
@@ -39,14 +41,22 @@ class TrainingApp:
         parser.add_argument("--n_feats", type=int, default=8)
         parser.add_argument("--n_heads", type=int, default=4)
         parser.add_argument("--n_hidden", type=int, default=8)
-        parser.add_argument("--device", type=str, default="cpu")
-        parser.add_argument("--n_demos", type=int, default=1000)
+        parser.add_argument("--device", type=str, default="mps")
+        parser.add_argument("--n_demos", type=int, default=100)
         parser.add_argument("--n_epochs", type=int, default=100)
         parser.add_argument("--n_print", type=int, default=2)
         parser.add_argument("--n_act", type=int, default=10)
         parser.add_argument("--weight_pol", type=int, default=1)
         parser.add_argument("--weigh_val", type=int, default=0)
         parser.add_argument("--tb_prefix", type=str, default="synth_demo")
+        parser.add_argument("--len_data", type=int, default=100)
+        parser.add_argument("--fract_synth", type=float, default=0.5)
+        parser.add_argument(
+            "--model_file",
+            type=str,
+            help="File name to load model params from.",
+            default=None,
+        )
         parser.add_argument(
             "comment",
             type=str,
@@ -54,14 +64,7 @@ class TrainingApp:
             nargs="?",
             default="synth",
         )
-        parser.add_argument(
-            "model_file",
-            type=str,
-            help="File name to load model params from.",
-            nargs="?",
-            default=None,
-            # default="synth_2023-03-29_10.31.07_synth_1170.pt"
-        )
+
         self.args = parser.parse_args(sys_argv)
         self.time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H.%M.%S")
         self.training_samples_count = 0
@@ -88,7 +91,7 @@ class TrainingApp:
         return model
 
     def init_optimizer(self):
-        return torch.optim.AdamW(self.model.parameters(), lr=self.args.lr)
+        return torch.optim.AdamW(self.model.parameters(), lr=self.args.lr_initial)
 
     def init_dl(self):
         pass
@@ -123,9 +126,7 @@ class TrainingApp:
             "optimizer_name": type(self.optimizer).__name__,
             "epoch": i_epoch,
             "training_samples_count": self.training_samples_count,
-            "dim_3d": model.dim_3d,
-            "device": model.device,
-            "n_logits": model.n_logits,
+            "args": vars(self.args),
         }
         torch.save(model.state_dict(), file_path)
         # save parameters in a json file
@@ -136,7 +137,7 @@ class TrainingApp:
         )
         with open(state_file_path, "w") as f:
             json.dump(state, f)
-        log.debug(f"Saved model params to {file_path}")
+        log.debug(f"Saved model params to {state_file_path}")
         with open(file_path, "rb") as f:
             log.info(f"SHA!: {hashlib.sha1(f.read()).hexdigest()}")
 
@@ -144,12 +145,22 @@ class TrainingApp:
         file_path = Path("data_unversioned").joinpath(
             "models",
             self.args.tb_prefix,
-            model_file,
+            model_file + ".pt",
         )
         self.model.load_state_dict(torch.load(file_path))
         self.model.eval()
 
-    def main(self):
+    def set_lr(self, i_epoch):
+        if i_epoch <= self.args.lr_decay_epochs:
+            lr = self.args.lr_initial * (self.args.lr_final / self.args.lr_initial) ** (
+                i_epoch / self.args.lr_decay_epochs
+            )
+        else:
+            lr = self.args.lr_final
+        for g in self.optimizer.param_groups:
+            g["lr"] = lr
+
+    def train(self):
         pass
 
 
@@ -201,17 +212,22 @@ class SyntheticDemoTrainingApp(TrainingApp):
         best_samples = torch.min(rank_ubs, -1)
         return new_states, scalars + 1, best_samples, (uu, vv, ww)
 
-    def main(self):
+    def train(self):
         if self.args.model_file is not None:
             print(f"loading model {self.args.model_file}")
             self.load_model(self.args.model_file)
         dl_train, dl_test = self.init_dl()
         for i_epoch in range(self.args.n_epochs):
+            self.set_lr(i_epoch)
+            print(f"lr {self.optimizer.param_groups[0]['lr']}")
             epoch_loss_pol = 0
             epoch_loss_val = 0
             # training epoch
             self.model.train()
             for states, scalars, target_actions, rewards in dl_train:
+                print(
+                    f"start train batch of size {states.shape[0]}, train length {len(dl_train.dataset)}/{len(dl_train)}"
+                )
                 loss_pol, loss_val = self.model.fwd_train(
                     states, scalars, target_actions, rewards
                 )
@@ -277,5 +293,67 @@ class SyntheticDemoTrainingApp(TrainingApp):
                         print(f"E{i_epoch} : lowest rank found = {lowest_rank}")
 
 
+class TensorGameTrainingApp(TrainingApp):
+    def __init__(self):
+        super().__init__()
+        self.dataset = self.init_ds()
+        self.dl = self.init_dl()
+
+    def init_ds(self):
+        dataset = TensorGameDataset(
+            self.args.len_data,
+            self.args.fract_synth,
+            self.args.max_actions,
+            self.args.n_demos,
+            self.args.dim_t,
+            self.args.dim_3d,
+            self.args.device,
+        )
+        return dataset
+
+    def init_dl(self):
+        dl = DataLoader(self.dataset, batch_size=self.args.batch_size, shuffle=True)
+        return dl
+
+    def train_step(self, i_epoch):
+        self.set_lr(i_epoch)
+        print(f"lr {self.optimizer.param_groups[0]['lr']}")
+        self.dataset.reset_synth_indexes()
+        self.model.train()
+        dl = DataLoader(self.dataset, batch_size=self.args.batch_size, shuffle=True)
+        i_break = 0
+        epoch_loss_pol = 0
+        epoch_loss_val = 0
+        for states, scalars, target_actions, rewards in dl:
+            loss_pol, loss_val = self.model.fwd_train(
+                states, scalars, target_actions, rewards
+            )
+            epoch_loss_pol += loss_pol
+            epoch_loss_val += loss_val
+            loss = self.args.weight_pol * loss_pol + self.args.weigh_val * loss_val
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            i_break += 1
+            if i_break > 4:
+                break
+        epoch_loss_pol /= len(dl.dataset)
+        epoch_loss_val /= len(dl.dataset)
+        self.log_metrics(i_epoch, "trn", epoch_loss_pol, epoch_loss_val)
+
+    def act_step(self):
+        pass
+
+    def train(self):
+        self.model = self.model.to(self.args.device)
+
+        for i_epoch in range(self.args.n_epochs):
+            self.train_step()
+
+            # Solution search printout
+            if i_epoch % self.args.n_act == 0:
+                self.act_step()
+
+
 if __name__ == "__main__":
-    SyntheticDemoTrainingApp().main()
+    SyntheticDemoTrainingApp().train()

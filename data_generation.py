@@ -1,3 +1,4 @@
+import numpy as np
 from pathlib import Path
 from typing import List, Tuple
 
@@ -5,8 +6,13 @@ import torch
 from torch.distributions.categorical import Categorical
 from torch.utils.data import Dataset
 
+from utils import get_scalars
 
 SAVE_DIR_SYNTH_DEMOS = Path("data_unversioned/synthetic_demos")
+SAVE_DIR_PLAYED_GAMES = Path("data_unversioned/played_games")
+
+PLAYED_GAMES_BUFFER_SIZE = 10000
+BEST_GAMES_BUFFER_SIZE = 100
 
 
 class SyntheticDemoDataset(Dataset):
@@ -23,6 +29,7 @@ class SyntheticDemoDataset(Dataset):
         probs=(0.15, 0.7, 0.15),
         overwrite=True,
         save_dir=SAVE_DIR_SYNTH_DEMOS,
+        **kwargs,
     ):
         super().__init__()
         self.max_actions = max_actions
@@ -148,6 +155,179 @@ class SyntheticDemoDataset(Dataset):
         distrib = Categorical(self.probs)
         idx_sample = distrib.sample(torch.Size([self.dim_3d]))
         return self.values[idx_sample]
+
+
+class PlayedGamesDataset(Dataset):
+    """Create a dataset of played games."""
+
+    def __init__(
+        self,
+        buffer_size: int,
+        device: str,
+        save_dir=SAVE_DIR_PLAYED_GAMES,
+        **kwargs,
+    ):
+        super().__init__()
+        self.n_games = 0
+        self.buffer_size = buffer_size
+        self.game_data = {}
+        self.device = device
+        self.save_dir = save_dir
+
+    def __del__(self):
+        for f in self.save_dir.glob("*.pt"):
+            f.unlink()
+
+    def __len__(self):
+        return sum(self.game_data.values())
+
+    @torch.no_grad()
+    def __getitem__(self, idx: int):
+        i = 0
+        while idx >= self.game_data[i]:
+            idx -= self.game_data[i]
+            i += 1
+        state_list = torch.load(Path(self.save_dir, f"state_list_{i}.pt"))
+        action_list = torch.load(Path(self.save_dir, f"action_list_{i}.pt"))
+        reward_list = torch.load(Path(self.save_dir, f"reward_list_{i}.pt"))
+        return (
+            state_list[idx].to(self.device),
+            get_scalars(state_list[idx], idx, batch_size=False).to(self.device),
+            action_list[idx].to(self.device).argmax(dim=-1),
+            reward_list[idx].to(self.device).reshape(1),
+        )
+
+    def add_game(
+        self,
+        state_list: List[torch.Tensor],
+        action_list: List[torch.Tensor],
+        reward_list: List[torch.Tensor],
+    ):
+        self.game_data[self.n_games] = len(state_list)
+        torch.save(
+            state_list,
+            self.save_dir.joinpath(f"state_list_{self.n_games}.pt"),
+        )
+        torch.save(
+            action_list,
+            self.save_dir.joinpath(f"action_list_{self.n_games}.pt"),
+        )
+        torch.save(
+            reward_list,
+            self.save_dir.joinpath(f"reward_list_{self.n_games}.pt"),
+        )
+        self.n_games = (self.n_games + 1) % self.buffer_size
+
+
+class TensorGameDataset(Dataset):
+    def __init__(
+        self,
+        len_data: int,
+        fract_synth: float,
+        max_actions: int,
+        n_demos: int,
+        dim_t: int,
+        dim_3d: int,
+        device: str,
+        **kwargs,
+    ):
+        super().__init__()
+        self.len_data = len_data
+        self.buffer_synth = SyntheticDemoDataset(
+            max_actions,
+            n_demos,
+            dim_t,
+            dim_3d,
+            device,
+            **kwargs,
+        )
+        self.buffer_played = PlayedGamesDataset(
+            device, buffer_size=PLAYED_GAMES_BUFFER_SIZE
+        )
+        self.buffer_best = PlayedGamesDataset(
+            device, buffer_size=BEST_GAMES_BUFFER_SIZE
+        )
+        self.is_synth = torch.ones(len_data, dtype=torch.bool)
+        self.index_synth = torch.from_numpy(
+            np.random.choice(len(self.buffer_synth), len_data, replace=False)
+        )
+        self.index_played = None
+        self.index_best = None
+        self.fract_synth = fract_synth
+        self.fract_best = 0
+        self.dim_t = dim_t
+        self.dim_3d = dim_3d
+        self.device = device
+
+    def __len__(self):
+        return self.len_data
+
+    def __getitem__(self, idx):
+        len_synth = self.is_synth[:idx].sum()
+        if self.is_synth[idx]:
+            return self.buffer_synth[self.index_synth[len_synth]]
+        else:
+            synth_offset = idx - len_synth
+            if self.fract_best > 0 and self.index_best is not None:
+                len_best = len(self.index_best)
+                best_offset = synth_offset - len_best
+                if synth_offset < len_best:
+                    return self.buffer_best[self.index_best[synth_offset]]
+                else:
+                    return self.buffer_played[self.index_played[best_offset]]
+            else:
+                return self.buffer_played[self.index_played[synth_offset]]
+
+    def reset_synth_indexes(self):
+        if len(self.buffer_played) > 0:
+            self.is_synth = torch.rand(self.len_data) < self.fract_synth
+            len_synth = self.is_synth.sum().item()
+            self.index_synth = torch.from_numpy(
+                np.random.choice(len(self.buffer_synth), len_synth, replace=False)
+            )
+            if len(self.buffer_best) > 0 and self.fract_best > 0:
+                len_played = int(1 - self.fract_synth - self.fract_best) * self.len_data
+                replace_played = len_played > len(self.buffer_played)
+                len_best = self.len_data - len_synth - len_played
+                replace_best = len_best > len(self.buffer_best)
+                self.index_played = torch.from_numpy(
+                    np.random.choice(
+                        len(self.buffer_played), len_played, replace=replace_played
+                    )
+                )
+                self.index_best = torch.from_numpy(
+                    np.random.choice(
+                        len(self.buffer_best), len_best, replace=replace_best
+                    )
+                )
+            else:
+                len_played = self.len_data - len_synth
+                replace_played = len_played > len(self.buffer_played)
+                self.index_played = torch.from_numpy(
+                    np.random.choice(
+                        len(self.buffer_played), len_played, replace=replace_played
+                    )
+                )
+
+    def set_fractions(self, fract_synth, fract_best):
+        self.fract_synth = fract_synth
+        self.fract_best = fract_best
+
+    def add_game(
+        self,
+        state_list: List[torch.Tensor],
+        action_list: List[torch.Tensor],
+        reward_list: List[torch.Tensor],
+    ):
+        self.buffer_played.add_game(state_list, action_list, reward_list)
+
+    def add_best_game(
+        self,
+        state_list: List[torch.Tensor],
+        action_list: List[torch.Tensor],
+        reward_list: List[torch.Tensor],
+    ):
+        self.buffer_best.add_game(state_list, action_list, reward_list)
 
 
 class StrassenDemoDataset(Dataset):
