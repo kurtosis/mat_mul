@@ -1,6 +1,6 @@
 from data_generation import *
 from model import *
-from synthetic_training import TrainingApp
+from training import TrainingApp
 
 from torch.utils.data import DataLoader
 

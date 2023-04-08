@@ -5,7 +5,7 @@
 # from model import *
 # from data_generation import *
 # from strassen_training import *
-from synthetic_training import *
+from training import *
 # from utils import *
 
 
