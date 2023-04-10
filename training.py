@@ -334,6 +334,10 @@ class TensorGameTrainingApp(TrainingApp):
         epoch_loss_pol = 0
         epoch_loss_val = 0
         for state_batch, scalar_batch, action_batch, reward_batch in dl:
+            # state_batch ~ (batch_size, dim_t, dim_3d, dim_3d, dim_3d)
+            # scalar_batch ~ (batch_size, 1)
+            # action_batch ~ (batch_size, 12)
+            # reward_batch ~ (batch_size, 1)
             loss_pol, loss_val = self.model.fwd_train(
                 state_batch, scalar_batch, action_batch, reward_batch
             )

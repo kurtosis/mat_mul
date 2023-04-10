@@ -10,6 +10,7 @@ from utils import *
 
 SAVE_DIR_SYNTH_DEMOS = Path("data_unversioned/synthetic_demos")
 SAVE_DIR_PLAYED_GAMES = Path("data_unversioned/played_games")
+SAVE_DIR_BEST_GAMES = Path("data_unversioned/best_games")
 
 PLAYED_GAMES_BUFFER_SIZE = 10000
 BEST_GAMES_BUFFER_SIZE = 100
@@ -72,6 +73,11 @@ class SyntheticDemoDataset(Dataset):
 
     @torch.no_grad()
     def __getitem__(self, idx: int):
+        """Returns:
+            target_tensor: tensor of shape (dim_t, dim_3d, dim_3d, dim_3d)
+            scalar: scalar of shape (1)
+            action: action of shape (12)
+            reward: reward of shape (1)"""
         idx_demo = idx // self.max_actions
         idx_action = idx % self.max_actions
         action_seq = torch.load(self.save_dir.joinpath(f"action_seq_{idx_demo}.pt"))
@@ -183,7 +189,12 @@ class PlayedGamesDataset(Dataset):
 
     @torch.no_grad()
     def __getitem__(self, idx: int):
-        """Get a game from the dataset."""
+        """Get a game from the dataset.
+            Returns:
+                target_tensor: tensor of shape (dim_t, dim_3d, dim_3d, dim_3d)
+                scalar: scalar of shape (1)
+                action: action of shape (12)
+                reward: reward of shape (1)"""
         i = 0
         while idx >= self.game_lengths[i]:
             idx -= self.game_lengths[i]
@@ -198,7 +209,7 @@ class PlayedGamesDataset(Dataset):
             action_seq[idx].to(self.device),
             # Why do this over the prob dist?
             # action_seq[idx].to(self.device).argmax(dim=-1),
-            reward_seq[idx].to(self.device).reshape(1),
+            reward_seq[idx].reshape(1).to(self.device),
         )
 
     def add_game(
@@ -246,8 +257,8 @@ class TensorGameDataset(Dataset):
             device,
             **kwargs,
         )
-        self.buffer_played = PlayedGamesDataset(PLAYED_GAMES_BUFFER_SIZE, device)
-        self.buffer_best = PlayedGamesDataset(BEST_GAMES_BUFFER_SIZE, device)
+        self.buffer_played = PlayedGamesDataset(PLAYED_GAMES_BUFFER_SIZE, device, save_dir=SAVE_DIR_PLAYED_GAMES)
+        self.buffer_best = PlayedGamesDataset(BEST_GAMES_BUFFER_SIZE, device, save_dir=SAVE_DIR_BEST_GAMES)
         self.is_synth = torch.ones(len_data, dtype=torch.bool)
         self.index_synth = torch.from_numpy(
             np.random.choice(len(self.buffer_synth), len_data, replace=False)
@@ -267,7 +278,7 @@ class TensorGameDataset(Dataset):
         return self.len_data
 
     def __getitem__(self, idx):
-        """Get a state from the dataset."""
+        """Get a state from the dataset, from one of buffer_synth, buffer_played, buffer_best."""
         len_synth = self.is_synth[:idx].sum()
         if self.is_synth[idx]:
             return self.buffer_synth[self.index_synth[len_synth]]

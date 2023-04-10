@@ -246,6 +246,8 @@ class PolicyHead(nn.Module):
             aa[:, i + 1] = distrib.sample()  # allow to sample 0, but reserve for <SOS>
             p_i = distrib.probs[torch.arange(batch_size*n_samples), aa[:, i + 1]]  # (batch_size)
             pp = torch.mul(pp, p_i)
+        # TO DO: fix predict_action_logits to not return <SOS> as a valid action
+        aa[aa == 0] = 2  # replace 0 with 2
         return (
             aa[:, 1:].view(batch_size, n_samples, self.n_steps),
             pp.view(batch_size, n_samples),
