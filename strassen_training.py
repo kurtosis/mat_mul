@@ -1,4 +1,4 @@
-from data_generation import *
+from datasets import *
 from model import *
 from training import TrainingApp
 
@@ -37,7 +37,7 @@ class StrassenTrainingApp(TrainingApp):
                     break
             print(f"action: {aa.squeeze()} ; valid: {valid}")
             uu, vv, ww = torch.split(aa.squeeze() - 2, 4, dim=-1)
-            action_tensor = factors_to_tensor((uu, vv, ww))
+            action_tensor = uvw_to_tensor((uu, vv, ww))
             current_state = current_state - action_tensor
             print(
                 f"step {ii} : {torch.sum(current_state != 0)} nonzero elements remaining"
@@ -92,7 +92,7 @@ def confirm_strassen(strassen):
                 break
         ff = action_list[ii]
         uu, vv, ww = torch.split(ff - 2, 4, dim=-1)
-        action_tensor = factors_to_tensor((uu, vv, ww))
+        action_tensor = uvw_to_tensor((uu, vv, ww))
         current_state = current_state - action_tensor
         print(f"step {ii} : {torch.sum(current_state != 0)} nonzero elements remaining")
 

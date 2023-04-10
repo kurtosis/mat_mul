@@ -23,6 +23,7 @@ def get_scalars(tt: torch.Tensor, t_step: int, batch_size=True):
     Args:
         tt: Tensor of shape (batch_size, dim_t, dim_3d, dim_3d, dim_3d)
         t_step: Time step
+        batch_size: Whether the input tensor is batched or single example
     Returns:
         scalars: Tensor of shape (batch_size, 1)
     """
@@ -41,7 +42,6 @@ def uvw_to_demo(uu: torch.Tensor, vv: torch.Tensor, ww: torch.Tensor, device: st
     with 0 reserved for start of sequence token."""
     mult_tensor = torch.zeros((4, 4, 4), device=device)
     for i in torch.arange(uu.shape[0]):
-        # mul_tensor += torch.einsum("p,qr->pqr", uu[i], torch.outer(vv[i], ww[i]))
         mult_tensor += (
             uu[i].view(-1, 1, 1) * vv[i].view(1, -1, 1) * ww[i].view(1, 1, -1)
         )

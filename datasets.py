@@ -74,10 +74,10 @@ class SyntheticDemoDataset(Dataset):
     @torch.no_grad()
     def __getitem__(self, idx: int):
         """Returns:
-            target_tensor: tensor of shape (dim_t, dim_3d, dim_3d, dim_3d)
-            scalar: scalar of shape (1)
-            action: action of shape (12)
-            reward: reward of shape (1)"""
+        target_tensor: tensor of shape (dim_t, dim_3d, dim_3d, dim_3d)
+        scalar: scalar of shape (1)
+        action: action of shape (12)
+        reward: reward of shape (1)"""
         idx_demo = idx // self.max_actions
         idx_action = idx % self.max_actions
         action_seq = torch.load(self.save_dir.joinpath(f"action_seq_{idx_demo}.pt"))
@@ -138,16 +138,15 @@ class SyntheticDemoDataset(Dataset):
                         target_tensor += tensor_action
             yield action_seq, target_tensor
 
+    @staticmethod
     def _take_actions(
-        self,
-        # action_seq: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
         action_seq: List[torch.Tensor],
         target_tensor: torch.Tensor,
     ):
         """Given initial tensor state and action list, update the tensor by
         taking the actions"""
         for action in action_seq:
-            target_tensor = target_tensor - self.action_to_tensor(action)
+            target_tensor = target_tensor - action_to_tensor(action)
         return target_tensor
 
     # def _action_to_tensor(self, action: torch.Tensor):
@@ -190,11 +189,11 @@ class PlayedGamesDataset(Dataset):
     @torch.no_grad()
     def __getitem__(self, idx: int):
         """Get a game from the dataset.
-            Returns:
-                target_tensor: tensor of shape (dim_t, dim_3d, dim_3d, dim_3d)
-                scalar: scalar of shape (1)
-                action: action of shape (12)
-                reward: reward of shape (1)"""
+        Returns:
+            target_tensor: tensor of shape (dim_t, dim_3d, dim_3d, dim_3d)
+            scalar: scalar of shape (1)
+            action: action of shape (12)
+            reward: reward of shape (1)"""
         i = 0
         while idx >= self.game_lengths[i]:
             idx -= self.game_lengths[i]
@@ -257,8 +256,12 @@ class TensorGameDataset(Dataset):
             device,
             **kwargs,
         )
-        self.buffer_played = PlayedGamesDataset(PLAYED_GAMES_BUFFER_SIZE, device, save_dir=SAVE_DIR_PLAYED_GAMES)
-        self.buffer_best = PlayedGamesDataset(BEST_GAMES_BUFFER_SIZE, device, save_dir=SAVE_DIR_BEST_GAMES)
+        self.buffer_played = PlayedGamesDataset(
+            PLAYED_GAMES_BUFFER_SIZE, device, save_dir=SAVE_DIR_PLAYED_GAMES
+        )
+        self.buffer_best = PlayedGamesDataset(
+            BEST_GAMES_BUFFER_SIZE, device, save_dir=SAVE_DIR_BEST_GAMES
+        )
         self.is_synth = torch.ones(len_data, dtype=torch.bool)
         self.index_synth = torch.from_numpy(
             np.random.choice(len(self.buffer_synth), len_data, replace=False)
@@ -271,7 +274,9 @@ class TensorGameDataset(Dataset):
         self.dim_3d = dim_3d
         self.device = device
         matrix_size = int(np.sqrt(dim_3d))
-        self.target_tensor = build_matmul_tensor(dim_t, matrix_size, matrix_size, matrix_size)
+        self.target_tensor = build_matmul_tensor(
+            dim_t, matrix_size, matrix_size, matrix_size
+        )
 
     def __len__(self):
         """Return the length of the dataset."""

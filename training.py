@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
 
 from act import *
-from data_generation import *
+from datasets import *
 from model import *
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
