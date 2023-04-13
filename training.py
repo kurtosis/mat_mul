@@ -13,10 +13,11 @@ from act import *
 from datasets import *
 from model import *
 
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
+stream_handler = logging.StreamHandler()
+log.addHandler(stream_handler)
 
 
 class TrainingApp:
@@ -30,23 +31,31 @@ class TrainingApp:
         parser.add_argument("--dropout_p", type=float, default=0.5)
         parser.add_argument("--max_iters", type=int, default=10)
         parser.add_argument("--max_len", type=int, default=None)
-        parser.add_argument("--max_actions", type=int, default=1)
+        parser.add_argument("--max_actions", type=int, default=4)
         parser.add_argument("--batch_size", type=int, default=256)
         parser.add_argument("--dim_3d", type=int, default=4)
-        parser.add_argument("--dim_t", type=int, default=1)
+        parser.add_argument("--dim_t", type=int, default=3)
         parser.add_argument("--dim_s", type=int, default=1)
         parser.add_argument("--dim_c", type=int, default=8)
         parser.add_argument("--n_samples", type=int, default=4)
         parser.add_argument("--n_steps", type=int, default=12)
-        parser.add_argument("--n_logits", type=int, default=4)
+        parser.add_argument("--n_logits", type=int, default=3)
         parser.add_argument("--n_feats", type=int, default=8)
         parser.add_argument("--n_heads", type=int, default=4)
         parser.add_argument("--n_hidden", type=int, default=8)
         parser.add_argument("--device", type=str, default="cpu")
         parser.add_argument("--n_demos", type=int, default=100)
-        parser.add_argument("--n_epochs", type=int, default=12)
+        parser.add_argument("--n_epochs", type=int, default=102)
         parser.add_argument("--n_print", type=int, default=2)
         parser.add_argument("--n_act", type=int, default=10)
+        parser.add_argument("--n_save", type=int, default=10)
+        parser.add_argument("--n_mc", type=int, default=10)
+        parser.add_argument(
+            "--n_bar",
+            type=int,
+            default=100,
+            help="N_bar parameter for policy temperature.",
+        )
         parser.add_argument("--weight_pol", type=int, default=1)
         parser.add_argument("--weigh_val", type=int, default=0)
         parser.add_argument("--tb_prefix", type=str, default="synth_demo")
@@ -108,8 +117,14 @@ class TrainingApp:
                 # log_dir=log_dir + "-val-" + self.args.comment
             )
 
-    def log_metrics(self, *args, **kwargs):
-        pass
+    def log_metrics(self, i_epoch, mode_str, epoch_loss_pol, epoch_loss_val):
+        self.init_tensorboard_writers()
+        log.info(f"E{i_epoch} {self.training_samples_count} {type(self).__name__}")
+        log.info(f"E{i_epoch} {mode_str} loss_policy {epoch_loss_pol}")
+        log.info(f"E{i_epoch} {mode_str} loss_value  {epoch_loss_val}")
+        writer = getattr(self, mode_str + "_writer")
+        writer.add_scalar("loss_policy", epoch_loss_pol, self.training_samples_count)
+        writer.add_scalar("loss_value", epoch_loss_val, self.training_samples_count)
 
     def save_model(self, type_str, i_epoch):
         file_path = Path("data_unversioned").joinpath(
@@ -188,12 +203,12 @@ class SyntheticDemoTrainingApp(TrainingApp):
         dl_test = DataLoader(demos_test, batch_size=self.args.batch_size, shuffle=True)
         return dl_train, dl_test
 
-    def log_metrics(self, i_epoch, mode_str, epoch_loss_pol, epoch_loss_val):
-        self.init_tensorboard_writers()
-        log.info(f"E{i_epoch} {type(self).__name__}")
-        writer = getattr(self, mode_str + "_writer")
-        writer.add_scalar("loss_policy", epoch_loss_pol, self.training_samples_count)
-        writer.add_scalar("loss_value", epoch_loss_val, self.training_samples_count)
+    # def log_metrics(self, i_epoch, mode_str, epoch_loss_pol, epoch_loss_val):
+    #     self.init_tensorboard_writers()
+    #     log.info(f"E{i_epoch} {type(self).__name__}")
+    #     writer = getattr(self, mode_str + "_writer")
+    #     writer.add_scalar("loss_policy", epoch_loss_pol, self.training_samples_count)
+    #     writer.add_scalar("loss_value", epoch_loss_val, self.training_samples_count)
 
     def _take_action(self, state_batch, scalar_batch):
         """Input: current environment: state_batch and scalar_batch
@@ -263,15 +278,15 @@ class SyntheticDemoTrainingApp(TrainingApp):
                     )
                     epoch_loss_pol += loss_pol
                     epoch_loss_val += loss_val
-
                 epoch_loss_pol /= len(dl_test.dataset)
                 epoch_loss_val /= len(dl_test.dataset)
                 self.log_metrics(i_epoch, "val", epoch_loss_pol, epoch_loss_val)
-                self.save_model("synth", i_epoch)
                 print(
                     f"VAL epoch: {i_epoch} policy loss: {epoch_loss_pol} "
                     f"value loss {epoch_loss_val}"
                 )
+            if i_epoch % self.args.n_save == 0:
+                self.save_model("synth", i_epoch)
             # Solution search printout
             if i_epoch % self.args.n_act == 0:
                 for dl, val in [(dl_train, "train"), (dl_test, "test")]:
@@ -280,12 +295,17 @@ class SyntheticDemoTrainingApp(TrainingApp):
                     lowest_rank = torch.tensor(self.model.dim_3d**3)
                     num_solutions_found = 0
                     for state_batch, scalar_batch, _, _ in dl:
-                        state_batch = state_batch.repeat(self.args.n_samples, 1, 1, 1, 1)
+                        state_batch = state_batch.repeat(
+                            self.args.n_samples, 1, 1, 1, 1
+                        )
                         scalar_batch = scalar_batch.repeat(self.args.n_samples, 1)
                         for i in range(self.args.max_actions):
-                            state_batch, scalar_batch, best_samples, _ = self._take_action(
-                                state_batch, scalar_batch
-                            )
+                            (
+                                state_batch,
+                                scalar_batch,
+                                best_samples,
+                                _,
+                            ) = self._take_action(state_batch, scalar_batch)
                             lowest_rank = torch.min(
                                 lowest_rank, torch.min(best_samples.values)
                             )
@@ -366,11 +386,17 @@ class TensorGameTrainingApp(TrainingApp):
         best_reward = -1e6
         best_game = None
         for actor_id in range(n_samples):
-            # TO DO : complete actor_prediction
-            state_seq, action_seq, reward_seq = actor_prediction(
+            # state_seq, action_seq, reward_seq = actor_prediction(
+            #     self.model,
+            #     initial_state,
+            #     self.args.max_actions,
+            # )
+            state_seq, action_seq, reward_seq = actor_prediction_mcts(
                 self.model,
                 initial_state,
                 self.args.max_actions,
+                self.args.n_mc,
+                self.args.n_bar,
             )
             if reward_seq[-1] > best_reward:
                 best_reward = reward_seq[-1]
@@ -383,14 +409,18 @@ class TensorGameTrainingApp(TrainingApp):
         self.model = self.model.to(self.args.device)
         self.dataset.set_fractions(0.7, 0.05)
         for i_epoch in range(self.args.n_epochs):
-            if i_epoch + 1 == self.args.n_epochs // 50:
-                # is this even necessary?
-                self.dataset.set_fractions(0.7, 0.05)
+            # if i_epoch + 1 == self.args.n_epochs // 50:
+            #     # is this even necessary?
+            #     self.dataset.set_fractions(0.7, 0.05)
             self.train_step(i_epoch)
 
             # Solution search printout
             if i_epoch % self.args.n_act == 0:
                 self.act_step(self.dataset.target_tensor, self.args.n_samples)
+
+            if i_epoch % self.args.n_save == 0:
+                self.save_model("synth", i_epoch)
+                # TO DO: decide how to handle saving dataset
 
 
 if __name__ == "__main__":
