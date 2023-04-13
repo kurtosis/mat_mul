@@ -28,6 +28,7 @@ class SyntheticDemoDataset(Dataset):
         device: str,
         values=(-1, 0, 1),
         probs=(0.15, 0.7, 0.15),
+        shift=1,
         overwrite=True,
         save_dir=SAVE_DIR_SYNTH_DEMOS,
         **kwargs,
@@ -39,6 +40,7 @@ class SyntheticDemoDataset(Dataset):
         self.dim_3d = dim_3d
         self.values = torch.tensor(values)
         self.probs = torch.tensor(probs)
+        self.shift = shift
         self.device = device
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -134,7 +136,7 @@ class SyntheticDemoDataset(Dataset):
 
                     if not (tensor_action == 0).all():
                         valid_action = True
-                        action_seq.append(torch.cat((uu, vv, ww)) + 2)
+                        action_seq.append(torch.cat((uu, vv, ww)) + self.shift)
                         target_tensor += tensor_action
             yield action_seq, target_tensor
 
@@ -204,7 +206,6 @@ class PlayedGamesDataset(Dataset):
         return (
             state_seq[idx].to(self.device),
             get_scalars(state_seq[idx], idx, batch_size=False).to(self.device),
-            # TO DO : remove zeros from action_seq ??
             action_seq[idx].to(self.device),
             # Why do this over the prob dist?
             # action_seq[idx].to(self.device).argmax(dim=-1),
