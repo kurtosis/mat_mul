@@ -32,7 +32,7 @@ class Head(nn.Module):
         q = self.query(x)  # (*, nx, d)
         k = self.key(y)  # (*, ny, d)
         v = self.value(y)  # (*, ny, d)
-        a = q @ k.transpose(-2, -1) / (self.d ** 0.5)  # (*, nx, ny)
+        a = q @ k.transpose(-2, -1) / (self.d**0.5)  # (*, nx, ny)
         if self.causal_mask:
             b = torch.tril(torch.ones_like(a))
             a = a.masked_fill(b == 0, float("-inf"))
@@ -104,7 +104,7 @@ class Torso(nn.Module):
         self.dim_3d = dim_3d
         self.dim_t = dim_t
         self.dim_c = dim_c
-        self.li1 = nn.ModuleList([nn.Linear(dim_s, dim_3d ** 2) for _ in range(3)])
+        self.li1 = nn.ModuleList([nn.Linear(dim_s, dim_3d**2) for _ in range(3)])
         self.li2 = nn.ModuleList(
             [nn.Linear(dim_3d * dim_t + 1, dim_c) for _ in range(3)]
         )
@@ -132,7 +132,7 @@ class Torso(nn.Module):
             g[i] = self.li2[i](g[i])  # (*, dim_3d, dim_3d, dim_c)
         g = self.blocks(g)  # [(*, dim_3d, dim_3d, dim_c)] * 3
         ee = torch.stack(g, dim=2)  # (*, 3, dim_3d, dim_3d, dim_c)
-        ee = ee.reshape(-1, 3 * self.dim_3d ** 2, self.dim_c)  # (*, 3*dim_3d**2, dim_c)
+        ee = ee.reshape(-1, 3 * self.dim_3d**2, self.dim_c)  # (*, 3*dim_3d**2, dim_c)
         return ee
 
 
@@ -142,11 +142,18 @@ class PredictBlock(nn.Module):
         super().__init__()
         self.ln1 = nn.LayerNorm(n_feats * n_heads)
         self.att1 = MultiHeadAttention(
-            n_feats * n_heads, n_feats * n_heads, n_heads=n_heads, causal_mask=True,
+            n_feats * n_heads,
+            n_feats * n_heads,
+            n_heads=n_heads,
+            causal_mask=True,
         )
         self.dropout1 = nn.Dropout(dropout_p)
         self.ln2 = nn.LayerNorm(n_feats * n_heads)
-        self.att2 = MultiHeadAttention(n_feats * n_heads, dim_c, n_heads=n_heads,)
+        self.att2 = MultiHeadAttention(
+            n_feats * n_heads,
+            dim_c,
+            n_heads=n_heads,
+        )
         self.dropout2 = nn.Dropout(dropout_p)
 
     def forward(self, xx: torch.Tensor, ee: torch.Tensor):
@@ -177,7 +184,7 @@ class PredictActionLogits(nn.Module):
         **kwargs
     ):
         super().__init__()
-        self.emb1 = nn.Embedding(n_logits, n_feats * n_heads)
+        self.emb1 = nn.Embedding(n_logits + 1, n_feats * n_heads)  # +1 for START token
         self.pos_enc = nn.Parameter(torch.rand(n_steps, n_feats * n_heads))
         pos_enc_fix = create_fixed_positional_encoding(
             n_steps, n_feats * n_heads, device
@@ -205,20 +212,25 @@ class PolicyHead(nn.Module):
     def __init__(self, n_steps: int, n_logits: int, dim_c: int, device="cpu", **kwargs):
         super().__init__()
         self.n_steps = n_steps
+        self.n_logits = n_logits
         self.device = device
         self.predict_action_logits = PredictActionLogits(
-            n_steps, n_logits, dim_c, **kwargs,
+            n_steps,
+            n_logits,
+            dim_c,
+            **kwargs,
         )
 
     def fwd_train(self, ee: torch.Tensor, gg: torch.Tensor):
         # ee (B, dim_m, dim_c) ; gg (B, n_steps)
         if self.device == "mps":
-            gg_shifted = torch.zeros_like(gg, dtype=torch.long)
+            # gg_shifted = torch.zeros_like(gg, dtype=torch.long)
+            gg_shifted = self.n_logits * torch.ones_like(gg, dtype=torch.long)
             gg_shifted[:, 1:] = gg[:, :-1]
             gg = gg_shifted
         else:
             gg = gg.long().roll(shifts=1, dims=1)  # (n_steps)
-            gg[:, 0] = 0
+            gg[:, 0] = self.n_logits  # START token
 
         oo, zz = self.predict_action_logits(
             gg, ee
@@ -243,11 +255,13 @@ class PolicyHead(nn.Module):
         for i in range(self.n_steps):
             oo_s, zz_s = self.predict_action_logits(aa[:, : i + 1], ee)
             distrib = Categorical(logits=oo_s[:, i])
-            aa[:, i + 1] = distrib.sample()  # allow to sample 0, but reserve for <SOS>
-            p_i = distrib.probs[torch.arange(batch_size*n_samples), aa[:, i + 1]]  # (batch_size)
+            aa[:, i + 1] = distrib.sample()  # allow to sample 0, but reserve for START
+            p_i = distrib.probs[
+                torch.arange(batch_size * n_samples), aa[:, i + 1]
+            ]  # (batch_size)
             pp = torch.mul(pp, p_i)
-        # TO DO: fix predict_action_logits to not return <SOS> as a valid action
-        aa[aa == 0] = 2  # replace 0 with 2
+        # TO DO: fix predict_action_logits to not return START as a valid action
+        # aa[aa == 0] = 2  # replace 0 with 2
         return (
             aa[:, 1:].view(batch_size, n_samples, self.n_steps),
             pp.view(batch_size, n_samples),
