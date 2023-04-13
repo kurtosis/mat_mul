@@ -36,10 +36,11 @@ def get_scalars(tt: torch.Tensor, t_step: int, batch_size=True):
     return scalars
 
 
-def uvw_to_demo(uu: torch.Tensor, vv: torch.Tensor, ww: torch.Tensor, device: str):
+def uvw_to_demo(
+    uu: torch.Tensor, vv: torch.Tensor, ww: torch.Tensor, device: str, shift=1
+):
     """Converts a triplet of factor lists to the tensor and action_list.
-    Assumes factor values are in {-1, 0, 1} and shifts factor tokens to start at 1,
-    with 0 reserved for start of sequence token."""
+    Assumes factor values are in {-1, 0, 1} and shifts factor tokens to start at 0."""
     mult_tensor = torch.zeros((4, 4, 4), device=device)
     for i in torch.arange(uu.shape[0]):
         mult_tensor += (
@@ -47,29 +48,31 @@ def uvw_to_demo(uu: torch.Tensor, vv: torch.Tensor, ww: torch.Tensor, device: st
         )
     # convert to steps/actions
     action_list = torch.cat((uu, vv, ww), dim=1)
-    action_list += 2
+    action_list += shift
     return mult_tensor, action_list
 
 
-def action_to_uvw(action: torch.Tensor):
-    """Convert the standard representation of an action to the factor representation.
+def action_to_uvw(action: torch.Tensor, shift=1):
+    """Convert the standard representation of an action (or batch of actions) to the factor representation.
     Args:
-        action: Tensor of shape (3*dim_3d)
+        action: Tensor of shape (*, 3*dim_3d) (action may be a singleton or batch)
+        shift: Shift factor values by this amount
     Returns:
-        uvw: Tuple of 3 Tensors of shape (dim_3d)
+        uvw: Tuple of 3 Tensors of shape (*, dim_3d)
     """
-    assert len(action.shape) == 1
-    dim_3d = action.shape[0] // 3
-    uvw = (action - 2).split(dim_3d, dim=-1)
+    # assert len(action.shape) <= 2
+    dim_3d = action.shape[-1] // 3
+    uvw = (action - shift).split(dim_3d, dim=-1)
+    # uvw = [x.squeeze() for x in uvw]
     return uvw
 
 
 def uvw_to_tensor(uvw: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
     """Convert the factor representation of an action to the tensor representation.
-        Args:
-            uvw: Tuple of 3 Tensors of shape (dim_3d)
-        Returns:
-            tensor_action: Tensor of shape (dim_3d, dim_3d, dim_3d)
+    Args:
+        uvw: Tuple of 3 Tensors of shape (dim_3d)
+    Returns:
+        tensor_action: Tensor of shape (dim_3d, dim_3d, dim_3d)
     """
     uu, vv, ww = uvw
     if uu.dim() == 1:
@@ -85,25 +88,22 @@ def uvw_to_tensor(uvw: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
 
 def action_to_tensor(action: torch.Tensor):
     """Convert the standard representation of an action to the tensor representation.
-        Args:
-            action: Tensor of shape (3*dim_3d)
-        Returns:
-            tensor_action: Tensor of shape (dim_3d, dim_3d, dim_3d)
-            """
+    Args:
+        action: Tensor of shape (3*dim_3d)
+    Returns:
+        tensor_action: Tensor of shape (dim_3d, dim_3d, dim_3d)
+    """
     uvw = action_to_uvw(action)
     return uvw_to_tensor(uvw)
 
 
-def get_present_state(state: torch.Tensor, unsqueeze=True):
+def get_current_state(state: torch.Tensor, unsqueeze=True):
     """
-        Args:
-            state: Tensor of shape (batch_size, dim_t, dim_3d, dim_3d, dim_3d)
-        Returns:
-            present_state: Tensor of shape (batch_size, 1, dim_3d, dim_3d, dim_3d)
-                                        or (batch_size, dim_3d, dim_3d, dim_3d)
-    :param state:
-    :param unsqueeze:
-    :return:
+    Args:
+        state: Tensor of shape (batch_size, dim_t, dim_3d, dim_3d, dim_3d)
+    Returns:
+        present_state: Tensor of shape (batch_size, 1, dim_3d, dim_3d, dim_3d)
+                                    or (batch_size, dim_3d, dim_3d, dim_3d)
     """
     if unsqueeze:
         return state[:, 0].unsqueeze(1)
@@ -126,15 +126,15 @@ def update_state(state: torch.Tensor, action: torch.Tensor, batch=True):
         new_state = torch.cat((new_tensor, state[:, :-1]), dim=1)
     else:
         tensor_action = action_to_tensor(action)
-        new_tensor = get_present_state(state) + tensor_action
+        new_tensor = get_current_state(state) + tensor_action
         new_state = torch.cat((new_tensor, state[:-1]), dim=0)
     return new_state
 
 
 def get_rank(state: torch.Tensor):
-    current_state = state[:, 0]
+    curr = get_current_state(state, unsqueeze=False)
     # return int(torch.linalg.matrix_rank(current_state).sum())
-    return torch.linalg.matrix_rank(current_state).sum()
+    return torch.linalg.matrix_rank(curr).sum()
 
 
 def build_matmul_tensor(dim_t: int, dim_i: int, dim_j: int, dim_k: int):
@@ -156,3 +156,30 @@ def build_matmul_tensor(dim_t: int, dim_i: int, dim_j: int, dim_k: int):
         for j in range(dim_j):
             matmul_tensor[0, (ik // dim_j) * dim_k + j, j * dim_j + ik % dim_j, ik] = 1
     return matmul_tensor
+
+
+def state_to_str(state: torch.Tensor):
+    """Converts a state tensor to a string, suitable for dict key."""
+    string = "_".join(state.reshape(-1).long().detach().cpu().numpy().astype(str).tolist())
+    return string
+
+
+def str_to_tensor(string: str, shape: tuple) -> torch.Tensor:
+    """Converts a string back to the original tensor.
+    Args:
+        string (str): String version of tensor.
+        shape (tuple): The shape of the original tensor.
+    """
+    return torch.tensor([float(x) for x in string.split("_")]).resize(shape)
+
+
+def tensor_factorized(state):
+    """Determines whether tensor has been factorized.
+    TO DO: figure out all the dimensions we need.
+    Args:
+        state (torch.Tensor): The state of the game.
+    """
+    # state size (*, S, S, S)
+    return (state[0] == 0).all()
+
+
