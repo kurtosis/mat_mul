@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import List, Tuple
 
 import torch
 
@@ -97,13 +97,14 @@ def action_to_tensor(action: torch.Tensor):
     return uvw_to_tensor(uvw)
 
 
-def get_current_state(state: torch.Tensor, unsqueeze=True):
+def get_head_state(state: torch.Tensor, unsqueeze=True):
     """
     Args:
         state: Tensor of shape (batch_size, dim_t, dim_3d, dim_3d, dim_3d)
     Returns:
-        present_state: Tensor of shape (batch_size, 1, dim_3d, dim_3d, dim_3d)
+        head_state: Tensor of shape (batch_size, 1, dim_3d, dim_3d, dim_3d)
                                     or (batch_size, dim_3d, dim_3d, dim_3d)
+                                    the current state of matmul tensor
     """
     if unsqueeze:
         return state[:, 0].unsqueeze(1)
@@ -126,15 +127,15 @@ def update_state(state: torch.Tensor, action: torch.Tensor, batch=True):
         new_state = torch.cat((new_tensor, state[:, :-1]), dim=1)
     else:
         tensor_action = action_to_tensor(action)
-        new_tensor = get_current_state(state) + tensor_action
+        new_tensor = get_head_state(state) + tensor_action
         new_state = torch.cat((new_tensor, state[:-1]), dim=0)
     return new_state
 
 
 def get_rank(state: torch.Tensor):
-    curr = get_current_state(state, unsqueeze=False)
+    headstate = get_head_state(state, unsqueeze=False)
     # return int(torch.linalg.matrix_rank(current_state).sum())
-    return torch.linalg.matrix_rank(curr).sum()
+    return torch.linalg.matrix_rank(headstate).sum()
 
 
 def build_matmul_tensor(dim_t: int, dim_i: int, dim_j: int, dim_k: int):
@@ -160,17 +161,19 @@ def build_matmul_tensor(dim_t: int, dim_i: int, dim_j: int, dim_k: int):
 
 def state_to_str(state: torch.Tensor):
     """Converts a state tensor to a string, suitable for dict key."""
-    string = "_".join(state.reshape(-1).long().detach().cpu().numpy().astype(str).tolist())
+    string = "_".join(
+        state.reshape(-1).long().detach().cpu().numpy().astype(str).tolist()
+    )
     return string
 
 
-def str_to_tensor(string: str, shape: tuple) -> torch.Tensor:
+def str_to_state(string: str, shape: tuple) -> torch.Tensor:
     """Converts a string back to the original tensor.
     Args:
         string (str): String version of tensor.
         shape (tuple): The shape of the original tensor.
     """
-    return torch.tensor([float(x) for x in string.split("_")]).resize(shape)
+    return torch.tensor([float(x) for x in string.split("_")]).reshape(shape)
 
 
 def tensor_factorized(state):
@@ -183,3 +186,7 @@ def tensor_factorized(state):
     return (state[0] == 0).all()
 
 
+def remove_null_actions(state: torch.Tensor, candidate_states: List[torch.Tensor]):
+    """From a list of candidate states, return indexes of entries that differ from original state."""
+    idxs = [i for i, c in enumerate(candidate_states) if (c[:, 0] != state[:, 0]).any()]
+    return idxs

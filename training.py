@@ -29,17 +29,29 @@ class TrainingApp:
         parser.add_argument("--lr_final", type=float, default=1e-4)
         parser.add_argument("--lr_decay_epochs", type=int, default=10)
         parser.add_argument("--dropout_p", type=float, default=0.5)
-        parser.add_argument("--max_iters", type=int, default=10)
-        parser.add_argument("--max_len", type=int, default=None)
-        parser.add_argument("--max_actions", type=int, default=4)
+        # parser.add_argument("--max_iters", type=int, default=10)
+        # parser.add_argument("--max_len", type=int, default=None)
+        parser.add_argument(
+            "--max_actions",
+            help="Maximum number of actions to take in an MC trajectory",
+            type=int,
+            default=4,
+        )
         parser.add_argument("--batch_size", type=int, default=256)
         parser.add_argument("--dim_3d", type=int, default=4)
         parser.add_argument("--dim_t", type=int, default=3)
         parser.add_argument("--dim_s", type=int, default=1)
         parser.add_argument("--dim_c", type=int, default=8)
-        parser.add_argument("--n_samples", type=int, default=4)
-        parser.add_argument("--n_steps", type=int, default=12)
-        parser.add_argument("--n_logits", type=int, default=3)
+        parser.add_argument(
+            "--n_steps",
+            help="Number of steps in a complete action",
+            type=int,
+            default=12,
+        )
+        parser.add_argument(
+            "--n_logits", help="Cardinality of action token set", type=int, default=3
+        )
+
         parser.add_argument("--n_feats", type=int, default=8)
         parser.add_argument("--n_heads", type=int, default=4)
         parser.add_argument("--n_hidden", type=int, default=8)
@@ -47,17 +59,34 @@ class TrainingApp:
         parser.add_argument("--n_demos", type=int, default=100)
         parser.add_argument("--n_epochs", type=int, default=102)
         parser.add_argument("--n_print", type=int, default=2)
-        parser.add_argument("--n_act", type=int, default=10)
+        parser.add_argument("--n_act", type=int, default=2)
         parser.add_argument("--n_save", type=int, default=10)
-        parser.add_argument("--n_mc", type=int, default=10)
+        parser.add_argument("--weight_pol", type=int, default=1)
+        parser.add_argument("--weigh_val", type=int, default=0)
+        parser.add_argument(
+            "--n_games",
+            help="Number of games to play in MC act stage",
+            type=int,
+            default=5,
+        )
+        parser.add_argument(
+            "--n_samples",
+            help="Number of actions to sample at each step in MC tree search",
+            type=int,
+            default=7,
+        )
+        parser.add_argument(
+            "--n_mc",
+            help="Number of games to play in MC tree search",
+            type=int,
+            default=10,
+        )
         parser.add_argument(
             "--n_bar",
             type=int,
             default=100,
             help="N_bar parameter for policy temperature.",
         )
-        parser.add_argument("--weight_pol", type=int, default=1)
-        parser.add_argument("--weigh_val", type=int, default=0)
         parser.add_argument("--tb_prefix", type=str, default="synth_demo")
         parser.add_argument("--len_data", type=int, default=100)
         parser.add_argument("--fract_synth", type=float, default=0.5)
@@ -91,6 +120,7 @@ class TrainingApp:
             self.args.dim_c,
             self.args.n_steps,
             self.args.n_logits,
+            self.args.n_samples,
             n_feats=self.args.n_feats,
             n_heads=self.args.n_heads,
             n_hidden=self.args.n_hidden,
@@ -232,7 +262,7 @@ class SyntheticDemoTrainingApp(TrainingApp):
         best_samples = torch.min(rank_ubs, -1)
         return new_state_batch, scalar_batch + 1, best_samples, (uu, vv, ww)
 
-    def train(self):
+    def main(self):
         if self.args.model_file is not None:
             print(f"loading model {self.args.model_file}")
             self.load_model(self.args.model_file)
@@ -375,23 +405,24 @@ class TensorGameTrainingApp(TrainingApp):
         epoch_loss_val /= training_samples_count
         self.log_metrics(i_epoch, "trn", epoch_loss_pol, epoch_loss_val)
 
-    def act_step(self, initial_state: torch.Tensor, n_samples: int):
+    @torch.no_grad()
+    def act_step(self, initial_state: torch.Tensor, n_games: int):
         """Plays a set of games and adds trajectories to played games buffer.
         Best game is added to best games buffer.
         Args:
             initial_state: initial value of the tensor to reduce
-            n_samples: number of games/trajectories to produce
+            n_games: number of games/trajectories to produce
         """
         self.model.eval()
         best_reward = -1e6
         best_game = None
-        for actor_id in range(n_samples):
-            # state_seq, action_seq, reward_seq = actor_prediction(
+        for _ in range(n_games):
+            # state_seq, action_seq, reward_seq = actor_prediction_simple(
             #     self.model,
             #     initial_state,
             #     self.args.max_actions,
             # )
-            state_seq, action_seq, reward_seq = actor_prediction_mcts(
+            state_seq, action_seq, reward_seq = actor_prediction(
                 self.model,
                 initial_state,
                 self.args.max_actions,
@@ -405,7 +436,7 @@ class TensorGameTrainingApp(TrainingApp):
         if best_game is not None:
             self.dataset.add_best_game(*best_game)
 
-    def train(self):
+    def main(self):
         self.model = self.model.to(self.args.device)
         self.dataset.set_fractions(0.7, 0.05)
         for i_epoch in range(self.args.n_epochs):
@@ -416,7 +447,7 @@ class TensorGameTrainingApp(TrainingApp):
 
             # Solution search printout
             if i_epoch % self.args.n_act == 0:
-                self.act_step(self.dataset.target_tensor, self.args.n_samples)
+                self.act_step(self.dataset.target_tensor, self.args.n_games)
 
             if i_epoch % self.args.n_save == 0:
                 self.save_model("synth", i_epoch)
@@ -424,5 +455,5 @@ class TensorGameTrainingApp(TrainingApp):
 
 
 if __name__ == "__main__":
-    # SyntheticDemoTrainingApp().train()
-    TensorGameTrainingApp().train()
+    # SyntheticDemoTrainingApp().main()
+    TensorGameTrainingApp().main()

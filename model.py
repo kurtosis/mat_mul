@@ -209,10 +209,19 @@ class PredictActionLogits(nn.Module):
 
 
 class PolicyHead(nn.Module):
-    def __init__(self, n_steps: int, n_logits: int, dim_c: int, device="cpu", **kwargs):
+    def __init__(
+        self,
+        n_steps: int,
+        n_logits: int,
+        n_samples: int,
+        dim_c: int,
+        device="cpu",
+        **kwargs
+    ):
         super().__init__()
         self.n_steps = n_steps
         self.n_logits = n_logits
+        self.n_samples = n_samples
         self.device = device
         self.predict_action_logits = PredictActionLogits(
             n_steps,
@@ -237,18 +246,20 @@ class PolicyHead(nn.Module):
         )  # oo (*, n_steps, n_logits) ; zz (*, n_steps, n_feats*n_heads)
         return oo, zz[:, 0, :]
 
-    def fwd_infer(self, ee: torch.Tensor, n_samples=32):
+    def fwd_infer(self, ee: torch.Tensor):
         batch_size = ee.shape[0]
         aa = torch.zeros(
             batch_size,
-            n_samples,
+            self.n_samples,
             self.n_steps + 1,
             dtype=torch.long,
             device=self.device,
         )
-        pp = torch.ones(batch_size, n_samples, device=self.device)
+        pp = torch.ones(batch_size, self.n_samples, device=self.device)
         # TO DO: understand these lines
-        ee = ee.unsqueeze(1).repeat(1, n_samples, 1, 1)  # (1, n_samples, dim_m, dim_c)
+        ee = ee.unsqueeze(1).repeat(
+            1, self.n_samples, 1, 1
+        )  # (1, n_samples, dim_m, dim_c)
         aa = aa.view(-1, self.n_steps + 1)  # (1*n_samples, n_steps)
         pp = pp.view(-1)  # (1*n_samples)
         ee = ee.view(-1, ee.shape[-2], ee.shape[-1])  # (1*n_samples, dim_m, dim_c)
@@ -257,15 +268,15 @@ class PolicyHead(nn.Module):
             distrib = Categorical(logits=oo_s[:, i])
             aa[:, i + 1] = distrib.sample()  # allow to sample 0, but reserve for START
             p_i = distrib.probs[
-                torch.arange(batch_size * n_samples), aa[:, i + 1]
+                torch.arange(batch_size * self.n_samples), aa[:, i + 1]
             ]  # (batch_size)
             pp = torch.mul(pp, p_i)
         # TO DO: fix predict_action_logits to not return START as a valid action
         # aa[aa == 0] = 2  # replace 0 with 2
         return (
-            aa[:, 1:].view(batch_size, n_samples, self.n_steps),
-            pp.view(batch_size, n_samples),
-            zz_s[:, 0].view(batch_size, n_samples, *zz_s.shape[2:]).mean(1),
+            aa[:, 1:].view(batch_size, self.n_samples, self.n_steps),
+            pp.view(batch_size, self.n_samples),
+            zz_s[:, 0].view(batch_size, self.n_samples, *zz_s.shape[2:]).mean(1),
         )  # (b, n_samples, n_steps), (b, n_samples), (b, n_feats*n_heads)
 
 
@@ -309,15 +320,20 @@ class AlphaTensor(nn.Module):
         dim_c=16,
         n_steps=12,
         n_logits=3,
+        n_samples=4,
         device="cpu",
         **kwargs
     ):
         super().__init__()
         self.dim_3d = dim_3d
+        self.n_steps = n_steps
         self.n_logits = n_logits
+        self.n_samples = n_samples
         self.device = device
         self.torso = Torso(dim_3d, dim_t, dim_s, dim_c, **kwargs)
-        self.policy_head = PolicyHead(n_steps, n_logits, dim_c, device=device, **kwargs)
+        self.policy_head = PolicyHead(
+            n_steps, n_logits, n_samples, dim_c, device=device, **kwargs
+        )
         self.value_head = ValueHead(**kwargs)
 
     @staticmethod
@@ -349,14 +365,13 @@ class AlphaTensor(nn.Module):
         l_val = quantile_loss(qq, g_value, device=self.device)
         return l_pol, l_val
 
-    def fwd_infer(self, xx: torch.Tensor, ss: torch.Tensor, n_samples=32):
+    def fwd_infer(self, xx: torch.Tensor, ss: torch.Tensor):
         """Generate trajectories from input state.
         Returns trajectory, probability, and value.
         """
         ee = self.torso(xx, ss)  # (3*dim_3d**2, dim_c)
-        aa, pp, z1 = self.policy_head.fwd_infer(
-            ee, n_samples
-        )  # aa (*, n_samples, n_steps) ; pp (*, n_samples) ; z1 (*, n_feats*n_heads)
+        aa, pp, z1 = self.policy_head.fwd_infer(ee)
+        # aa (*, n_samples, n_steps) ; pp (*, n_samples) ; z1 (*, n_feats*n_heads)
         qq = self.value_head(z1)  # (n)
         qq = self.value_risk_mgmt(qq)  # (1)
         return aa, pp, qq

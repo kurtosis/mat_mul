@@ -5,107 +5,7 @@ from model import AlphaTensor
 from utils import *
 
 
-@torch.no_grad()
-def simulate_game(
-    model: AlphaTensor,
-    state: torch.Tensor,
-    i_action: int,
-    max_actions: int,
-    mc_tree: Dict,
-    state_info: Dict,
-    horizon=5,
-):
-    """A single branching exploration from root state.
-
-    Args:
-        model: main AlphaTensor model.
-        state: Root state to play from.
-        i_action: The current action index.
-        max_actions: The maximum number of actions to play to.
-        mc_tree: Tree of states explored by MC.
-        state_info: Dict of auxiliary information for each state in mc_tree.
-        horizon: Number of actions to play forward from root state.
-
-    Returns:
-        state_info
-        mc_tree
-    """
-    idx = i_action
-    max_steps = min(max_actions, i_action + horizon)
-    state_string = state_to_str(get_current_state(state))
-    trajectory = []
-    while state_string in mc_tree:
-        (
-            # candidate_states_dict,
-            candidate_states,
-            # old_idx_to_new_idx,
-            # rep_map,
-            visit_count,
-            q_vals,
-            action_seq,
-        ) = state_info[state_string]
-        # candidate_states = expand_candidate_states(candidate_states_dict)
-        state_idx = select_next_state(
-            candidate_states,
-            q_vals,
-            visit_count,
-            # rep_map,
-            return_idx=True,
-        )
-        trajectory.append((state_string, state_idx))
-        state = candidate_states[state_idx]
-        next_state = get_current_state(state)
-        state_string = state_to_str(next_state)
-        idx += 1
-
-    # expansion
-    if idx <= max_steps:
-        trajectory.append((state_string, None))
-        if not tensor_factorized(get_current_state(state)):
-            state = state.to(model.device)
-            scalars = get_scalars(state, idx).to(state.device)
-            actions, probs, q_vals = model.fwd_infer(state, scalars, n_samples=1)
-            candidate_states = get_child_states(state, actions)
-            not_dupl_actions = actions[:, :].to("cpu")
-            not_dupl_q_values = torch.zeros(not_dupl_actions.shape[:-1]).to("cpu")
-            visit_count = torch.zeros_like(not_dupl_q_values).to("cpu")
-            current_state = get_current_state(state)
-            state_info[state_to_str(current_state)] = (
-                candidate_states,
-                # reps,
-                visit_count,
-                not_dupl_q_values,
-                not_dupl_actions,
-            )
-            mc_tree[state_to_str(current_state)] = [
-                state_to_str(get_current_state(candidate))
-                for candidate in candidate_states
-            ]
-            leaf_q_val = q_vals
-    else:
-        leaf_q_val = -int(torch.linalg.matrix_rank(state).sum())
-    backward_pass(trajectory, state_info, leaf_q_val)
-
-
-def backward_pass(trajectory, state_info, leaf_q_val):
-    pass
-
-    #
-    # state = initial_state
-    # time_step = initial_time
-    # state_list = [state[:, 0]]
-    # action_list = []
-    #
-    # while time_step < max_steps:
-    #     state = state.to(model.device)
-    #     actions, probs, q_vals = model.fwd_infer(state, time_step)
-    #     action_list.append(actions)
-    #     # state =
-    #     # state_list
-    #     # time_step += 1
-
-
-def actor_prediction(
+def actor_prediction_simple(
     model: AlphaTensor,
     initial_state: torch.Tensor,
     max_actions: int,
@@ -118,7 +18,8 @@ def actor_prediction(
     i_action = 0
     while i_action < max_actions:
         scalars = get_scalars(state, i_action)
-        aa, pp, qq = model.fwd_infer(state, scalars, n_samples=1)
+        aa, pp, qq = model.fwd_infer(state, scalars)
+        # aa, pp, qq = model.fwd_infer(state, scalars, n_samples=1)
         # action_tensor = action_to_tensor(aa.squeeze())
         ## while not torch.all(torch.eq(action_tensor, 0)):
         # while not (aa==0).all():
@@ -147,14 +48,26 @@ def actor_prediction(
     return state_seq, action_seq, reward_seq
 
 
-def actor_prediction_mcts(
+def actor_prediction(
     model: AlphaTensor,
     initial_state: torch.Tensor,
     max_actions: int,
     n_mc: int,
     n_bar: int,
 ):
-    """Given a model and initial state, produce a game trajectory."""
+    """Given a model and initial state, produce a game trajectory.
+
+    Args:
+        model: AlphaTensor model to select actions
+        initial_state: Initial state of trajectory.
+        max_actions: The maximum number of actions to take in a trajectory
+        n_mc: The number of simulations to run.
+        n_bar: The parameter used to compute the improved policy.
+    Returns:
+        state_seq: A list of states in the trajectory.
+        action_seq: A list of actions in the trajectory.
+        reward_seq: A list of rewards in the trajectory.
+    """
     state = initial_state.unsqueeze(0)
     state_seq = []
     mc_tree = {}
@@ -163,8 +76,9 @@ def actor_prediction_mcts(
     i_action = 0
     while i_action < max_actions:
         state_seq.append(state)
-        state_strings.append(state_to_str(get_current_state(state)))
-        state = mc_ts(
+        state_strings.append(state_to_str(get_head_state(state)))
+        # call mc_ts at each timestep to select next (action, state)
+        next_state, mc_tree, state_info = mc_ts(
             model,
             state,
             n_mc,
@@ -176,7 +90,6 @@ def actor_prediction_mcts(
         if tensor_factorized(state):
             break
         i_action += 1
-    end_state = get_current_state(state)
     action_seq = get_improved_policy(
         state_info,
         state_strings,
@@ -197,51 +110,175 @@ def mc_ts(
     state: torch.Tensor,
     n_mc: int,
     i_action: int,
-    n_actions: int,
+    max_actions: int,
     mc_tree: dict,
     state_info: dict,
 ):
     """Monte Carlo tree search.
 
     Args:
-        model (torch.nn.Module): main AlphaTensor model.
-        state (torch.Tensor): Root state for MC tree.
-        n_mc (int): The number of simulated games to play.
-        i_action (int): The current action index.
-        n_actions (int): The maximum number of actions to play to.
-        mc_tree (Dict): Tree of states explored by MC.
-        state_info (Dict): Stores auxiliary information for each state in mc_tree.
+        model: main AlphaTensor model.
+        state: Root state for MC tree.
+        n_mc: The number of simulated games to play from a new state.
+        i_action: The current action index.
+        max_actions: The maximum number of actions to play to.
+        mc_tree: Tree of states explored by MC.
+        state_info: Stores auxiliary information for each state in mc_tree.
 
     Returns:
-        next_state (torch.Tensor): Next state based on action chosen by MCTS.
+        next_state (torch.Tensor): Next state based on action chosen by MCTS
+        mc_tree: Tree updated based on chosen action
+        state_info: Info updated based on chosen action
     """
-    state_string = state_to_str(get_current_state(state))
+    state_string = state_to_str(get_head_state(state))
     if state_string in state_info:
         with torch.no_grad():
             visit_count = state_info[state_string][3]
             n_mc -= int(visit_count.sum())
             n_mc = max(n_mc, 0)
 
-    for _ in range(n_mc):
-        simulate_game(model, state, i_action, n_actions, mc_tree, state_info)
+    for i_mc in range(n_mc):
+        mc_tree, state_info = simulate_game(
+            model, state, i_action, max_actions, mc_tree, state_info
+        )
 
-    candidate_states, _, visit_count, q_vals, _ = state_info[state_string]
-    candidate_states = expand_candidate_states(candidate_states)
+    candidate_states, _, _, visit_count, q_vals, _ = state_info[state_string]
+    # candidate_states = expand_candidate_states(candidate_states)
+    repetitions = {i: [] for i, _ in enumerate(candidate_states)}
     next_state_idx = select_next_state(
-        candidate_states, q_vals, visit_count, return_idx=True
+        candidate_states, q_vals, visit_count, repetitions, return_idx=True
     )
     next_state = candidate_states[next_state_idx]
-    return next_state
+    return next_state, mc_tree, state_info
 
 
-def expand_candidate_states(candidate_states: Dict):
-    final_states = candidate_states["final_states"]
-    previous_actions = candidate_states["previous_actions"]
-    full_candidate_states = [
-        torch.cat([final_states[i], previous_actions], dim=1)
-        for i in range(len(final_states))
-    ]
-    return full_candidate_states
+@torch.no_grad()
+def simulate_game(
+    model: AlphaTensor,
+    state: torch.Tensor,
+    i_action: int,
+    max_actions: int,
+    mc_tree: Dict,
+    state_info: Dict,
+    horizon=5,
+):
+    """A single branching exploration from a root state.
+
+    Args:
+        model: main AlphaTensor model.
+        state: Root state to explore from.
+        i_action: The current action index.
+        max_actions: The maximum number of actions to play forward to.
+        mc_tree: Tree of states explored by MC.
+        state_info: Dict of auxiliary information for each state in mc_tree.
+        horizon: Number of actions to play forward from root state.
+
+    Returns:
+        state_info
+        mc_tree
+    """
+    new_state_info = state_info.copy()
+    new_mc_tree = mc_tree.copy()
+    idx = i_action
+    max_actions_mc = min(max_actions, i_action + horizon)
+    state_string = state_to_str(get_head_state(state))
+    trajectory = []
+    while state_string in new_mc_tree:
+        (
+            candidate_states,
+            _,
+            _,
+            visit_count,
+            q_vals,
+            action_seq,
+        ) = new_state_info[state_string]
+        # candidate_states = expand_candidate_states(candidate_states_dict)
+        repetitions = {i: [] for i, _ in enumerate(candidate_states)}
+        state_idx = select_next_state(
+            candidate_states,
+            q_vals,
+            visit_count,
+            repetitions,
+            # rep_map,
+            return_idx=True,
+        )
+        trajectory.append((state_string, state_idx))
+        state = candidate_states[state_idx]
+        next_state = get_head_state(state)
+        state_string = state_to_str(next_state)
+        idx += 1
+
+    # expansion
+    if idx <= max_actions_mc:
+        trajectory.append((state_string, None))
+        if not tensor_factorized(get_head_state(state)):
+            state = state.to(model.device)
+            scalars = get_scalars(state, idx).to(state.device)
+            candidate_states = []
+            while len(candidate_states) == 0:
+                actions, _, q_vals = model.fwd_infer(state, scalars)
+                candidate_states = get_child_states(state, actions)
+                idxs = remove_null_actions(state, candidate_states)
+                actions = actions[:, idxs]
+                candidate_states = [candidate_states[i] for i in idxs]
+            not_dupl_actions = actions[:, :].to("cpu")
+            not_dupl_q_values = torch.zeros(not_dupl_actions.shape[:-1]).to("cpu")
+            visit_count = torch.zeros_like(not_dupl_q_values).to("cpu")
+            headstate = get_head_state(state)
+            new_state_info[state_to_str(headstate)] = (
+                candidate_states,
+                0,  # cloned_idx_to_idx
+                0,  # repetitions
+                visit_count,
+                not_dupl_q_values,
+                not_dupl_actions,
+            )
+            new_mc_tree[state_to_str(headstate)] = [
+                state_to_str(get_head_state(candidate))
+                for candidate in candidate_states
+            ]
+            leaf_q_val = q_vals
+    else:
+        leaf_q_val = -int(torch.linalg.matrix_rank(state).sum())
+    new_state_info = backward_pass(trajectory, new_state_info, leaf_q_val)
+    return new_mc_tree, new_state_info
+
+
+def backward_pass(trajectory, state_info, leaf_q_val):
+    new_state_info = state_info.copy()
+    reward = 0
+    for idx, (state, action_idx) in enumerate(reversed(trajectory)):
+        if action_idx is None:
+            reward += leaf_q_val
+        else:
+            # visit_count = new_state_info[state][3]
+            # q_vals = new_state_info[state][4]
+            if isinstance(reward, torch.Tensor):
+                reward = reward.to(new_state_info[state][4].device)
+            action_idx = int(action_idx)
+            # TO DO add dupl lines here
+            not_dupl_index = action_idx
+            reward -= 1
+            new_state_info[state][4][:, not_dupl_index] = (
+                new_state_info[state][3][:, not_dupl_index]
+                * new_state_info[state][4][:, not_dupl_index]
+                + reward
+            ) / (new_state_info[state][3][:, not_dupl_index] + 1)
+            new_state_info[state][3][:, not_dupl_index] += 1
+            # new_state_info[state][3] = visit_count
+            # new_state_info[state][4] = q_vals
+    return new_state_info
+
+
+# we are not doing this for now
+# def expand_candidate_states(candidate_states: Dict):
+#     final_states = candidate_states["final_states"]
+#     previous_actions = candidate_states["previous_actions"]
+#     full_candidate_states = [
+#         torch.cat([final_states[i], previous_actions], dim=1)
+#         for i in range(len(final_states))
+#     ]
+#     return full_candidate_states
 
 
 def select_next_state(
@@ -257,10 +294,10 @@ def select_next_state(
     pi = torch.tensor(
         [len(reps[i]) for i in range(len(candidate_states)) if i in reps]
     ).to(q_vals.device)
-    if pi.shape[0] != visit_count[1]:
-        print(pi)
-        print(pi.shape, q_vals.shape, visit_count.shape)
-        pi = pi[: visit_count[1]]
+    if pi.shape[0] != visit_count.shape[1]:
+        # print(pi)
+        # print(pi.shape, q_vals.shape, visit_count.shape)
+        pi = pi[: visit_count.shape[1]]
     # ucb = q_vals.reshape(-1) + (
     #     c1 + torch.log((torch.sum(visit_count) + c2 + 1) / c2)
     # ) * pi * torch.sqrt(torch.sum(visit_count)) / (1 + visit_count)
@@ -278,20 +315,25 @@ def get_child_states(state: torch.Tensor, actions: torch.Tensor, vec_cardinality
     action_tensor = action_to_tensor(actions)
     # TO DO: remove duplicates if nec
     # action_tensor, _ = remove_duplicates(action_tensor)
-    initial_state = get_current_state(state)
-    new_state = initial_state - action_tensor
-    rolling_states = torch.roll(state, 1)[:, 2:]
-    return [
-        torch.cat(
-            [
-                new_state[:, i : i + 1],
-                action_tensor[:, i : i + 1],
-                rolling_states,
-            ],
-            dim=1,
-        )
+    initial_headstate = get_head_state(state)
+    new_headstates = initial_headstate - action_tensor
+    new_states = [
+        torch.cat([new_headstates[:, i : i + 1], state[:, :-1]], dim=1)
         for i in range(k)
     ]
+    return new_states
+    # rolling_states = torch.roll(state, 1)[:, 2:]
+    # return [
+    #     torch.cat(
+    #         [
+    #             new_headstates[:, i : i + 1],
+    #             action_tensor[:, i : i + 1],
+    #             rolling_states,
+    #         ],
+    #         dim=1,
+    #     )
+    #     for i in range(k)
+    # ]
 
 
 @torch.no_grad()
@@ -304,8 +346,8 @@ def get_improved_policy(
 ):
     policies = torch.zeros(len(state_strings), n_steps, n_logits)
     n_bar = torch.tensor(n_bar)
-    for ii, state in enumerate(state_strings):
-        _, _, _, visit_count, _, action_seq = state_info[state]
+    for ii, state_str in enumerate(state_strings):
+        _, _, _, visit_count, _, action_seq = state_info[state_str]
         if visit_count.sum() > n_bar:
             tau = (torch.log(visit_count.sum()) / torch.log(n_bar)).item()
         else:

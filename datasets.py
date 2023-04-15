@@ -206,7 +206,7 @@ class PlayedGamesDataset(Dataset):
         return (
             state_seq[idx].to(self.device),
             get_scalars(state_seq[idx], idx, batch_size=False).to(self.device),
-            action_seq[idx].to(self.device),
+            action_seq[idx].to(self.device).argmax(dim=-1),
             # Why do this over the prob dist?
             # action_seq[idx].to(self.device).argmax(dim=-1),
             reward_seq[idx].reshape(1).to(self.device),
