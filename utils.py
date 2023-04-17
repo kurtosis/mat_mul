@@ -1,6 +1,7 @@
 from typing import List, Tuple
 
 import torch
+from torch.distributions.categorical import Categorical
 
 
 def print_params(model):
@@ -134,8 +135,11 @@ def update_state(state: torch.Tensor, action: torch.Tensor, batch=True):
 
 def get_rank(state: torch.Tensor):
     headstate = get_head_state(state, unsqueeze=False)
-    # return int(torch.linalg.matrix_rank(current_state).sum())
-    return torch.linalg.matrix_rank(headstate).sum()
+    # Hack b/c MPS is not working
+    if headstate.is_mps:
+        return int(torch.linalg.matrix_rank(headstate.to("cpu")).sum())
+    else:
+        return int(torch.linalg.matrix_rank(headstate).sum())
 
 
 def build_matmul_tensor(dim_t: int, dim_i: int, dim_j: int, dim_k: int):
@@ -190,3 +194,35 @@ def remove_null_actions(state: torch.Tensor, candidate_states: List[torch.Tensor
     """From a list of candidate states, return indexes of entries that differ from original state."""
     idxs = [i for i, c in enumerate(candidate_states) if (c[:, 0] != state[:, 0]).any()]
     return idxs
+
+
+def factor_sample(values, probs, dim_3d):
+    distrib = Categorical(probs)
+    idx_sample = distrib.sample(torch.Size([dim_3d]))
+    return values[idx_sample]
+
+
+def create_synthetic_demo(
+    values: Tuple[int],
+    probs: Tuple[int],
+    n_actions: int,
+    dim_3d: int,
+    shift: int,
+):
+    """Generate a mult tensor and a list of actions producing it"""
+    target_tensor = torch.zeros(dim_3d, dim_3d, dim_3d)
+    action_seq = []
+    for i in range(n_actions):
+        valid_action = False
+        while not valid_action:
+            uu = factor_sample(values, probs, dim_3d)
+            vv = factor_sample(values, probs, dim_3d)
+            ww = factor_sample(values, probs, dim_3d)
+
+            tensor_action = uvw_to_tensor((uu, vv, ww))
+
+            if not (tensor_action == 0).all():
+                valid_action = True
+                action_seq.append(torch.cat((uu, vv, ww)) + shift)
+                target_tensor += tensor_action
+    return action_seq, target_tensor

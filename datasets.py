@@ -9,6 +9,7 @@ from torch.utils.data import Dataset
 from utils import *
 
 SAVE_DIR_SYNTH_DEMOS = Path("data_unversioned/synthetic_demos")
+SAVE_DIR_VAL = Path("data_unversioned/synthetic_demos_val")
 SAVE_DIR_PLAYED_GAMES = Path("data_unversioned/played_games")
 SAVE_DIR_BEST_GAMES = Path("data_unversioned/best_games")
 
@@ -151,10 +152,6 @@ class SyntheticDemoDataset(Dataset):
             target_tensor = target_tensor - action_to_tensor(action)
         return target_tensor
 
-    # def _action_to_tensor(self, action: torch.Tensor):
-    #     uvw = (action - 2).split(self.dim_3d, dim=-1)
-    #     return uvw_to_tensor(uvw)
-
     def _factor_sample(self):
         distrib = Categorical(self.probs)
         idx_sample = distrib.sample(torch.Size([self.dim_3d]))
@@ -241,17 +238,17 @@ class TensorGameDataset(Dataset):
         len_data: int,
         fract_synth: float,
         max_actions: int,
-        n_demos: int,
         dim_t: int,
         dim_3d: int,
         device: str,
+        start_tensor=None,
         **kwargs,
     ):
         super().__init__()
         self.len_data = len_data
         self.buffer_synth = SyntheticDemoDataset(
             max_actions,
-            n_demos,
+            len_data,
             dim_t,
             dim_3d,
             device,
@@ -275,30 +272,35 @@ class TensorGameDataset(Dataset):
         self.dim_3d = dim_3d
         self.device = device
         matrix_size = int(np.sqrt(dim_3d))
-        self.target_tensor = build_matmul_tensor(
-            dim_t, matrix_size, matrix_size, matrix_size
-        )
+        if start_tensor is None:
+            self.start_tensor = build_matmul_tensor(
+                dim_t, matrix_size, matrix_size, matrix_size
+            )
+        else:
+            self.start_tensor = start_tensor
 
     def __len__(self):
         """Return the length of the dataset."""
         return self.len_data
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int):
         """Get a state from the dataset, from one of buffer_synth, buffer_played, buffer_best."""
         len_synth = self.is_synth[:idx].sum()
         if self.is_synth[idx]:
-            return self.buffer_synth[self.index_synth[len_synth]]
+            return self.buffer_synth[int(self.index_synth[len_synth])]
         else:
             synth_remainder = idx - len_synth
             if self.fract_best > 0 and self.index_best is not None:
                 len_best = len(self.index_best)
                 if synth_remainder < len_best:
-                    return self.buffer_best[self.index_best[synth_remainder]]
+                    return self.buffer_best[int(self.index_best[synth_remainder])]
                 else:
                     synth_best_remainder = synth_remainder - len_best
-                    return self.buffer_played[self.index_played[synth_best_remainder]]
+                    return self.buffer_played[
+                        int(self.index_played[synth_best_remainder])
+                    ]
             else:
-                return self.buffer_played[self.index_played[synth_remainder]]
+                return self.buffer_played[int(self.index_played[synth_remainder])]
 
     def set_fractions(self, fract_synth, fract_best):
         self.fract_synth = fract_synth

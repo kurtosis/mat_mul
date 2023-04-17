@@ -329,12 +329,16 @@ class AlphaTensor(nn.Module):
         self.n_steps = n_steps
         self.n_logits = n_logits
         self.n_samples = n_samples
-        self.device = device
+        # self.device = torch.device(device)
         self.torso = Torso(dim_3d, dim_t, dim_s, dim_c, **kwargs)
         self.policy_head = PolicyHead(
             n_steps, n_logits, n_samples, dim_c, device=device, **kwargs
         )
         self.value_head = ValueHead(**kwargs)
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
 
     @staticmethod
     def value_risk_mgmt(qq: torch.Tensor, uq=0.75):

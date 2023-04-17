@@ -29,17 +29,47 @@ class TrainingApp:
         parser.add_argument("--lr_final", type=float, default=1e-4)
         parser.add_argument("--lr_decay_epochs", type=int, default=10)
         parser.add_argument("--dropout_p", type=float, default=0.5)
-        # parser.add_argument("--max_iters", type=int, default=10)
-        # parser.add_argument("--max_len", type=int, default=None)
+        parser.add_argument("--len_data", type=int, default=200)
+        parser.add_argument("--n_epochs", type=int, default=201)
+        parser.add_argument(
+            "--n_act",
+            help="Frequency (in epochs) of MC tree search",
+            type=int,
+            default=1,
+        )
+        parser.add_argument(
+            "--n_games",
+            help="Number of games to play in MC act stage",
+            type=int,
+            default=16,
+        )
         parser.add_argument(
             "--max_actions",
             help="Maximum number of actions to take in an MC trajectory",
             type=int,
             default=4,
         )
-        parser.add_argument("--batch_size", type=int, default=256)
+        parser.add_argument(
+            "--n_mc",
+            help="Number of simulations to run at each step of MC tree search",
+            type=int,
+            default=8,
+        )
+        parser.add_argument(
+            "--n_samples",
+            help="Number of actions to sample at each step in MC tree search",
+            type=int,
+            default=8,
+        )
+        parser.add_argument(
+            "--n_val", help="Frequency (in epochs) of validation", type=int, default=10
+        )
+        parser.add_argument(
+            "--n_save", help="Frequency (in epochs) of model save", type=int, default=10
+        )
+        parser.add_argument("--batch_size", type=int, default=512)
         parser.add_argument("--dim_3d", type=int, default=4)
-        parser.add_argument("--dim_t", type=int, default=3)
+        parser.add_argument("--dim_t", type=int, default=2)
         parser.add_argument("--dim_s", type=int, default=1)
         parser.add_argument("--dim_c", type=int, default=8)
         parser.add_argument(
@@ -51,45 +81,22 @@ class TrainingApp:
         parser.add_argument(
             "--n_logits", help="Cardinality of action token set", type=int, default=3
         )
-
-        parser.add_argument("--n_feats", type=int, default=8)
+        parser.add_argument("--n_feats", type=int, default=4)
         parser.add_argument("--n_heads", type=int, default=4)
-        parser.add_argument("--n_hidden", type=int, default=8)
-        parser.add_argument("--device", type=str, default="cpu")
-        parser.add_argument("--n_demos", type=int, default=100)
-        parser.add_argument("--n_epochs", type=int, default=102)
-        parser.add_argument("--n_print", type=int, default=2)
-        parser.add_argument("--n_act", type=int, default=2)
-        parser.add_argument("--n_save", type=int, default=10)
+        parser.add_argument("--n_hidden", type=int, default=512)
+        parser.add_argument("--device", type=str, default="mps")
         parser.add_argument("--weight_pol", type=int, default=1)
-        parser.add_argument("--weigh_val", type=int, default=0)
-        parser.add_argument(
-            "--n_games",
-            help="Number of games to play in MC act stage",
-            type=int,
-            default=5,
-        )
-        parser.add_argument(
-            "--n_samples",
-            help="Number of actions to sample at each step in MC tree search",
-            type=int,
-            default=7,
-        )
-        parser.add_argument(
-            "--n_mc",
-            help="Number of games to play in MC tree search",
-            type=int,
-            default=10,
-        )
+        parser.add_argument("--weight_val", type=int, default=1000)
         parser.add_argument(
             "--n_bar",
             type=int,
             default=100,
             help="N_bar parameter for policy temperature.",
         )
-        parser.add_argument("--tb_prefix", type=str, default="synth_demo")
-        parser.add_argument("--len_data", type=int, default=100)
-        parser.add_argument("--fract_synth", type=float, default=0.5)
+        parser.add_argument("--tb_prefix", type=str, default="tensor_game")
+        parser.add_argument("--fract_synth", type=float, default=0.75)
+        parser.add_argument("--fract_best", type=float, default=0.05)
+        parser.add_argument("--start_rank", type=int, default=1)
         parser.add_argument(
             "--model_file",
             type=str,
@@ -101,7 +108,7 @@ class TrainingApp:
             type=str,
             help="Comment suffix for Tensorboard run",
             nargs="?",
-            default="synth",
+            default="tg",
         )
 
         self.args = parser.parse_args(sys_argv)
@@ -203,6 +210,7 @@ class TrainingApp:
             lr = self.args.lr_initial * (self.args.lr_final / self.args.lr_initial) ** (
                 i_epoch / self.args.lr_decay_epochs
             )
+            print(f"reducing lr: {lr}")
         else:
             lr = self.args.lr_final
         for g in self.optimizer.param_groups:
@@ -221,7 +229,7 @@ class SyntheticDemoTrainingApp(TrainingApp):
     def init_dl(self):
         demos = SyntheticDemoDataset(
             self.args.dim_t,
-            self.args.n_demos,
+            self.args.len_data,
             self.args.dim_t,
             self.args.dim_3d,
             self.args.device,
@@ -230,15 +238,8 @@ class SyntheticDemoTrainingApp(TrainingApp):
         dl_train = DataLoader(
             demos_train, batch_size=self.args.batch_size, shuffle=True
         )
-        dl_test = DataLoader(demos_test, batch_size=self.args.batch_size, shuffle=True)
-        return dl_train, dl_test
-
-    # def log_metrics(self, i_epoch, mode_str, epoch_loss_pol, epoch_loss_val):
-    #     self.init_tensorboard_writers()
-    #     log.info(f"E{i_epoch} {type(self).__name__}")
-    #     writer = getattr(self, mode_str + "_writer")
-    #     writer.add_scalar("loss_policy", epoch_loss_pol, self.training_samples_count)
-    #     writer.add_scalar("loss_value", epoch_loss_val, self.training_samples_count)
+        dl_val = DataLoader(demos_test, batch_size=self.args.batch_size, shuffle=True)
+        return dl_train, dl_val
 
     def _take_action(self, state_batch, scalar_batch):
         """Input: current environment: state_batch and scalar_batch
@@ -266,10 +267,9 @@ class SyntheticDemoTrainingApp(TrainingApp):
         if self.args.model_file is not None:
             print(f"loading model {self.args.model_file}")
             self.load_model(self.args.model_file)
-        dl_train, dl_test = self.init_dl()
+        dl_train, dl_val = self.init_dl()
         for i_epoch in range(self.args.n_epochs):
             self.set_lr(i_epoch)
-            # print(f"lr {self.optimizer.param_groups[0]['lr']}")
             epoch_loss_pol = 0
             epoch_loss_val = 0
             # training epoch
@@ -284,7 +284,7 @@ class SyntheticDemoTrainingApp(TrainingApp):
                 epoch_loss_pol += loss_pol
                 epoch_loss_val += loss_val
                 loss_combined = (
-                    self.args.weight_pol * loss_pol + self.args.weigh_val * loss_val
+                    self.args.weight_pol * loss_pol + self.args.weight_val * loss_val
                 )
                 self.optimizer.zero_grad()
                 loss_combined.backward()
@@ -294,7 +294,7 @@ class SyntheticDemoTrainingApp(TrainingApp):
             epoch_loss_val /= len(dl_train.dataset)
             self.log_metrics(i_epoch, "trn", epoch_loss_pol, epoch_loss_val)
             # train/validation loss printout
-            if i_epoch % self.args.n_print == 0:
+            if i_epoch % self.args.n_val == 0:
                 print(
                     f"TRN epoch: {i_epoch} policy loss: {epoch_loss_pol} "
                     f"value loss {epoch_loss_val}"
@@ -302,14 +302,14 @@ class SyntheticDemoTrainingApp(TrainingApp):
                 self.model.eval()
                 epoch_loss_pol = 0
                 epoch_loss_val = 0
-                for state_batch, scalar_batch, action_batch, reward_batch in dl_test:
+                for state_batch, scalar_batch, action_batch, reward_batch in dl_val:
                     loss_pol, loss_val = self.model.fwd_train(
                         state_batch, scalar_batch, action_batch, reward_batch
                     )
                     epoch_loss_pol += loss_pol
                     epoch_loss_val += loss_val
-                epoch_loss_pol /= len(dl_test.dataset)
-                epoch_loss_val /= len(dl_test.dataset)
+                epoch_loss_pol /= len(dl_val.dataset)
+                epoch_loss_val /= len(dl_val.dataset)
                 self.log_metrics(i_epoch, "val", epoch_loss_pol, epoch_loss_val)
                 print(
                     f"VAL epoch: {i_epoch} policy loss: {epoch_loss_pol} "
@@ -319,7 +319,7 @@ class SyntheticDemoTrainingApp(TrainingApp):
                 self.save_model("synth", i_epoch)
             # Solution search printout
             if i_epoch % self.args.n_act == 0:
-                for dl, val in [(dl_train, "train"), (dl_test, "test")]:
+                for dl, val in [(dl_train, "train"), (dl_val, "val")]:
                     print(val)
                     self.model.eval()
                     lowest_rank = torch.tensor(self.model.dim_3d**3)
@@ -353,34 +353,67 @@ class TensorGameTrainingApp(TrainingApp):
 
     def __init__(self):
         super().__init__()
-        self.dataset = self.init_ds()
+        self.dataset, self.dataset_val = self.init_ds()
         self.dl = self.init_dl()
 
     def init_ds(self):
+        if self.args.start_rank:
+            # Create a start_tensor from a synthetic demo
+            values = torch.tensor((-1, 0, 1))
+            probs = torch.tensor((0.1, 0.8, 0.1))
+            shift = 1
+            action_seq, start_tensor = create_synthetic_demo(
+                values,
+                probs,
+                self.args.start_rank,
+                self.args.dim_3d,
+                shift,
+            )
+            start_tensor = start_tensor.unsqueeze(0)
+            start_tensor = torch.cat(
+                (
+                    start_tensor,
+                    torch.zeros(
+                        (
+                            self.args.dim_t - 1,
+                            self.args.dim_3d,
+                            self.args.dim_3d,
+                            self.args.dim_3d,
+                        )
+                    ),
+                )
+            )
+        else:
+            start_tensor = None
         dataset = TensorGameDataset(
             self.args.len_data,
             self.args.fract_synth,
             self.args.max_actions,
-            self.args.n_demos,
             self.args.dim_t,
             self.args.dim_3d,
             self.args.device,
+            start_tensor=start_tensor,
         )
-        return dataset
+        dataset_val = SyntheticDemoDataset(
+            self.args.max_actions,
+            2000,
+            self.args.dim_t,
+            self.args.dim_3d,
+            self.args.device,
+            save_dir=SAVE_DIR_VAL,
+        )
+        return dataset, dataset_val
 
     def init_dl(self):
         dl = DataLoader(self.dataset, batch_size=self.args.batch_size, shuffle=True)
         return dl
 
-    def train_step(self, i_epoch, max_batches=5):
+    def train_step(self, i_epoch):
         """Train model on up to 5 batches"""
         self.set_lr(i_epoch)
-        print(f"lr {self.optimizer.param_groups[0]['lr']}")
         self.dataset.resample_buffer_indexes()
         self.model.train()
         dl = DataLoader(self.dataset, batch_size=self.args.batch_size, shuffle=True)
-        i_batch = 0
-        training_samples_count = 0
         epoch_loss_pol = 0
         epoch_loss_val = 0
         for state_batch, scalar_batch, action_batch, reward_batch in dl:
@@ -391,22 +424,35 @@ class TensorGameTrainingApp(TrainingApp):
             loss_pol, loss_val = self.model.fwd_train(
                 state_batch, scalar_batch, action_batch, reward_batch
             )
-            loss = self.args.weight_pol * loss_pol + self.args.weigh_val * loss_val
+            loss = self.args.weight_pol * loss_pol + self.args.weight_val * loss_val
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             epoch_loss_pol += loss_pol
             epoch_loss_val += loss_val
-            i_batch += 1
-            training_samples_count += len(state_batch)
-            if i_batch == max_batches:
-                break
-        epoch_loss_pol /= training_samples_count
-        epoch_loss_val /= training_samples_count
+        epoch_loss_pol /= len(dl.dataset)
+        epoch_loss_val /= len(dl.dataset)
+        self.training_samples_count += len(dl.dataset)
         self.log_metrics(i_epoch, "trn", epoch_loss_pol, epoch_loss_val)
 
     @torch.no_grad()
-    def act_step(self, initial_state: torch.Tensor, n_games: int):
+    def val_step(self, i_epoch):
+        self.model.eval()
+        epoch_loss_pol = 0
+        epoch_loss_val = 0
+        dl = DataLoader(self.dataset_val, batch_size=self.args.batch_size)
+        for state_batch, scalar_batch, action_batch, reward_batch in dl:
+            loss_pol, loss_val = self.model.fwd_train(
+                state_batch, scalar_batch, action_batch, reward_batch
+            )
+            epoch_loss_pol += loss_pol
+            epoch_loss_val += loss_val
+        epoch_loss_pol /= len(dl.dataset)
+        epoch_loss_val /= len(dl.dataset)
+        self.log_metrics(i_epoch, "val", epoch_loss_pol, epoch_loss_val)
+
+    @torch.no_grad()
+    def act_step(self):
         """Plays a set of games and adds trajectories to played games buffer.
         Best game is added to best games buffer.
         Args:
@@ -416,7 +462,7 @@ class TensorGameTrainingApp(TrainingApp):
         self.model.eval()
         best_reward = -1e6
         best_game = None
-        for _ in range(n_games):
+        for _ in range(self.args.n_games):
             # state_seq, action_seq, reward_seq = actor_prediction_simple(
             #     self.model,
             #     initial_state,
@@ -424,7 +470,7 @@ class TensorGameTrainingApp(TrainingApp):
             # )
             state_seq, action_seq, reward_seq = actor_prediction(
                 self.model,
-                initial_state,
+                self.dataset.start_tensor,
                 self.args.max_actions,
                 self.args.n_mc,
                 self.args.n_bar,
@@ -435,25 +481,31 @@ class TensorGameTrainingApp(TrainingApp):
             self.dataset.add_played_game(state_seq, action_seq, reward_seq)
         if best_game is not None:
             self.dataset.add_best_game(*best_game)
+            self.val_writer.add_scalar(
+                "best reward", best_reward, self.training_samples_count
+            )
+            log.info(f"best_reward  {best_reward}")
 
     def main(self):
         self.model = self.model.to(self.args.device)
-        self.dataset.set_fractions(0.7, 0.05)
+        self.dataset.set_fractions(self.args.fract_synth, self.args.fract_best)
         for i_epoch in range(self.args.n_epochs):
             # if i_epoch + 1 == self.args.n_epochs // 50:
             #     # is this even necessary?
             #     self.dataset.set_fractions(0.7, 0.05)
             self.train_step(i_epoch)
 
+            if i_epoch % self.args.n_val == 0:
+                self.val_step(i_epoch)
+
             # Solution search printout
             if i_epoch % self.args.n_act == 0:
-                self.act_step(self.dataset.target_tensor, self.args.n_games)
+                self.act_step()
 
             if i_epoch % self.args.n_save == 0:
-                self.save_model("synth", i_epoch)
+                self.save_model(self.args.tb_prefix, i_epoch)
                 # TO DO: decide how to handle saving dataset
 
 
 if __name__ == "__main__":
-    # SyntheticDemoTrainingApp().main()
     TensorGameTrainingApp().main()
