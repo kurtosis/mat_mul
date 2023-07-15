@@ -158,7 +158,6 @@ class TrainingApp:
             )
             self.val_writer = SummaryWriter(
                 log_dir=log_dir.joinpath(self.time_str + "-val-" + self.args.comment)
-                # log_dir=log_dir + "-val-" + self.args.comment
             )
 
     def log_metrics(self, i_epoch, mode_str, epoch_loss_pol, epoch_loss_val):
@@ -182,7 +181,6 @@ class TrainingApp:
             model = model.module
         state = {
             "model_name": type(model).__name__,
-            # "optimizer_state": self.optimizer.state_dict(),
             "optimizer_name": type(self.optimizer).__name__,
             "epoch": i_epoch,
             "training_samples_count": self.training_samples_count,
@@ -252,8 +250,6 @@ class SyntheticDemoTrainingApp(TrainingApp):
         """Input: current environment: state_batch and scalar_batch
         Output: new environment: state_batch and scalar_batch, best ranks, actions"""
         aa, pp, qq = self.model.fwd_infer(state_batch, scalar_batch, n_samples=1)
-        # don't need this now b/c we shifted
-        # aa[aa == 0] = 2  # hack to avoid choosing <SOS> token
         uu, vv, ww = torch.split(aa.squeeze() - 2, self.args.dim_3d, dim=-1)
         action_tensor = uvw_to_tensor((uu, vv, ww))
         new_head = state_batch[:, 0] - action_tensor
@@ -377,8 +373,9 @@ class TensorGameTrainingApp(TrainingApp):
                 self.args.dim_3d,
                 shift,
             )
-            action_seq = [torch.tensor([2, 1, 1, 1, 2, 1, 1, 1, 2, 1, 1, 1])]
-            start_tensor = action_to_tensor(action_seq[0])
+            # test case
+            # action_seq = [torch.tensor([2, 1, 1, 1, 2, 1, 1, 1, 2, 1, 1, 1])]
+            # start_tensor = action_to_tensor(action_seq[0])
             start_tensor = start_tensor.unsqueeze(0)
             start_tensor = torch.cat(
                 (
@@ -430,7 +427,7 @@ class TensorGameTrainingApp(TrainingApp):
         for state_batch, scalar_batch, action_batch, reward_batch in dl:
             # state_batch ~ (batch_size, dim_t, dim_3d, dim_3d, dim_3d)
             # scalar_batch ~ (batch_size, 1)
-            # action_batch ~ (batch_size, 12)
+            # action_batch ~ (batch_size, n_steps)
             # reward_batch ~ (batch_size, 1)
             loss_pol, loss_val = self.model.fwd_train(
                 state_batch, scalar_batch, action_batch, reward_batch
@@ -466,9 +463,6 @@ class TensorGameTrainingApp(TrainingApp):
     def act_step(self):
         """Plays a set of games and adds trajectories to played games buffer.
         Best game is added to best games buffer.
-        # Args:
-        #     initial_state: initial value of the tensor to reduce
-        #     n_games: number of games/trajectories to produce
         """
         self.model.eval()
         best_reward = -1e6

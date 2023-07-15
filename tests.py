@@ -52,15 +52,6 @@ def test_mha():
 def test_attentive_mode():
     print("Test AttentiveMode")
     attm = AttentiveModeBatch(dim_3d, dim_c)
-    # xx1 = torch.rand(dim_3d, dim_3d, dim_c)
-    # xx2 = torch.rand(dim_3d, dim_3d, dim_c)
-    # xx3 = torch.rand(dim_3d, dim_3d, dim_c)
-    # g = [xx1, xx2, xx3]
-    # out = attm(g)
-    # print(f"out len {len(out)}")
-    # print(f"out shape {out[0].shape}")
-    # assert len(out) == 3
-    # assert out[0].shape == xx1.shape
     xx1 = torch.rand(batch_size, dim_3d, dim_3d, dim_c)
     xx2 = torch.rand(batch_size, dim_3d, dim_3d, dim_c)
     xx3 = torch.rand(batch_size, dim_3d, dim_3d, dim_c)
@@ -74,11 +65,6 @@ def test_attentive_mode():
 def test_torso():
     print("Test Torso")
     torso = Torso(dim_3d, dim_t, dim_s, dim_c)
-    # xx = torch.rand(dim_t, dim_3d, dim_3d, dim_3d)
-    # ss = torch.rand(dim_s)
-    # out = torso(xx, ss)
-    # print(f"out {out.shape}")
-    # assert out.shape == (3*dim_3d**2, dim_c)
     xx = torch.rand(batch_size, dim_t, dim_3d, dim_3d, dim_3d)
     ss = torch.rand(batch_size, dim_s)
     ee = torso(xx, ss)
@@ -138,7 +124,6 @@ def test_policy_head(
         pi.predict_action_logits.n_feats * pi.predict_action_logits.n_heads,
     )
     print(" Train passed")
-    # aa, pp, z1 = pi.infer_broadcast(ee, n_samples=32)
     aa, pp, z1 = pi.infer(ee, n_samples=32)
     assert aa.shape == (batch_size, 32, pi.predict_action_logits.n_steps)
     assert pp.shape == (batch_size, 32)
@@ -165,7 +150,6 @@ def test_quantile_loss(n=8, batch_size=16):
     ll = quantile_loss(qq, gg)
     assert ll.shape == torch.Size([])
     print(" Singleton passed")
-    # for batch, I think we still want to reduce loss over batch?
     qq = torch.rand(batch_size, n)
     gg = torch.rand(batch_size, n)
     ll = quantile_loss(qq, gg)

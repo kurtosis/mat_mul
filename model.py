@@ -23,8 +23,7 @@ class Head(nn.Module):
         self.query = nn.Linear(c1, d, bias=False)
         self.key = nn.Linear(c2, d, bias=False)
         self.value = nn.Linear(c2, d, bias=False)
-        # TO DO: put this in buffer, pass nx, ny earlier
-        # self.register_buffer("triu", torch.triu(torch.ones(nx, ny), dim=1))
+
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
         # x (*, nx, c1)
@@ -75,24 +74,11 @@ class AttentiveModeBatch(nn.Module):
         self.mha = MultiHeadAttention(c1, c1, **kwargs)
 
     def forward(self, g: list[torch.Tensor]):
-        # x1, x2, x3 = x_input
-        # x1,x2,x3 are all (*, dim_3d,dim_3d,c)
         for m1, m2 in [(0, 1), (1, 2), (2, 0)]:
-            # TO DO: confirm transpose is correct
             a = torch.cat((g[m1], g[m2]), dim=-2)  # (*, dim_3d,2*dim_3d,c)
-            # a = torch.cat(
-            #     (g[m1], g[m2].transpose(-2, -3)), dim=-2
-            # )  # (*, dim_3d,2*dim_3d,c)
-            # TO DO: make this parallel
             cc = self.mha(a, a)
             g[m1] = cc[:, :, : self.dim_3d, :]
             g[m2] = cc[:, :, self.dim_3d :, :]
-            # for i in range(self.dim_3d):
-            #     cc = self.mha(a[:, i, :, :], a[:, i, :, :])  # (2*dim_3d, c)
-            #     g[m1][:, i, :, :] = cc[:, : self.dim_3d, :]  # (dim_3d, c)
-            #     g[m2][:, i, :, :] = cc[:, self.dim_3d :, :]  # (dim_3d, c)
-            # Is below a bug in paper?
-            # g[m2][i, :, :] = cc[dim_3d:, :].transpose(0, 1)
         return g  # [(*, dim_3d, dim_3d, c)]*3
 
 
@@ -233,7 +219,6 @@ class PolicyHead(nn.Module):
     def fwd_train(self, ee: torch.Tensor, gg: torch.Tensor):
         # ee (B, dim_m, dim_c) ; gg (B, n_steps)
         if self.device == "mps":
-            # gg_shifted = torch.zeros_like(gg, dtype=torch.long)
             gg_shifted = self.n_logits * torch.ones_like(gg, dtype=torch.long)
             gg_shifted[:, 1:] = gg[:, :-1]
             gg = gg_shifted
@@ -257,7 +242,6 @@ class PolicyHead(nn.Module):
         )
         aa[:, :, 0] = self.n_logits  # start w/ SOS token
         pp = torch.ones(batch_size, self.n_samples, device=self.device)
-        # TO DO: understand these lines
         ee = ee.unsqueeze(1).repeat(
             1, self.n_samples, 1, 1
         )  # (1, n_samples, dim_m, dim_c)
@@ -272,8 +256,6 @@ class PolicyHead(nn.Module):
                 torch.arange(batch_size * self.n_samples), aa[:, i + 1]
             ]  # (batch_size)
             pp = torch.mul(pp, p_i)
-        # TO DO: fix predict_action_logits to not return START as a valid action
-        # aa[aa == 0] = 2  # replace 0 with 2
         return (
             aa[:, 1:].view(batch_size, self.n_samples, self.n_steps),
             pp.view(batch_size, self.n_samples),
@@ -301,14 +283,10 @@ class ValueHead(nn.Module):
 def quantile_loss(qq: torch.Tensor, gg: torch.Tensor, delta=1, device="cpu"):
     # qq (n) ; gg (*)
     n = qq.shape[-1]
-    # TO DO: store tau in buffer?
     tau = (torch.arange(n, dtype=torch.float32, device=device) + 0.5) / n  # (n)
     hh = F.huber_loss(gg.expand(-1, n), qq, reduction="none", delta=delta)  # (n)
     dd = gg - qq  # (n)
-    # TO DO: is the sign of dd correct?
     kk = torch.abs(tau - (dd > 0).float())  # (n)
-    # flipped sign from paper
-    # kk = torch.abs(tau - (dd < 0).float())  # (n)
     return torch.mean(torch.mul(hh, kk))  # ()
 
 
@@ -330,7 +308,6 @@ class AlphaTensor(nn.Module):
         self.n_steps = n_steps
         self.n_logits = n_logits
         self.n_samples = n_samples
-        # self.device = torch.device(device)
         self.torso = Torso(dim_3d, dim_t, dim_s, dim_c, **kwargs)
         self.policy_head = PolicyHead(
             n_steps, n_logits, n_samples, dim_c, device=device, **kwargs
@@ -343,8 +320,6 @@ class AlphaTensor(nn.Module):
 
     @staticmethod
     def value_risk_mgmt(qq: torch.Tensor, uq=0.75):
-        # qq (batch_size, n)
-        # TO DO: can make this int?
         jj = ceil(uq * qq.shape[-1]) - 1
         return torch.mean(qq[:, jj:], dim=-1)
 
@@ -365,7 +340,6 @@ class AlphaTensor(nn.Module):
         l_pol = F.cross_entropy(
             oo.view(-1, self.n_logits), g_action.view(-1), reduction="sum"
         )
-        # TO DO: the dims don't seem correct here
         qq = self.value_head(zz)  # (n)
         l_val = quantile_loss(qq, g_value, device=self.device)
         return l_pol, l_val

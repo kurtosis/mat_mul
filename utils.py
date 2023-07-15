@@ -61,10 +61,8 @@ def action_to_uvw(action: torch.Tensor, shift=1):
     Returns:
         uvw: Tuple of 3 Tensors of shape (*, dim_3d)
     """
-    # assert len(action.shape) <= 2
     dim_3d = action.shape[-1] // 3
     uvw = (action - shift).split(dim_3d, dim=-1)
-    # uvw = [x.squeeze() for x in uvw]
     return uvw
 
 

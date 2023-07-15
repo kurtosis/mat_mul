@@ -204,8 +204,6 @@ class PlayedGamesDataset(Dataset):
             state_seq[idx].to(self.device),
             get_scalars(state_seq[idx], idx, batch_size=False).to(self.device),
             action_seq[idx].to(self.device).argmax(dim=-1),
-            # Why do this over the prob dist?
-            # action_seq[idx].to(self.device).argmax(dim=-1),
             reward_seq[idx].reshape(1).to(self.device),
         )
 
@@ -360,49 +358,6 @@ class TensorGameDataset(Dataset):
     ):
         self.buffer_best.add_game(state_seq, action_seq, reward_seq)
 
-    # @property
-    # def target_tensor(self) -> torch.Tensor:
-    #     max_matrix_size = int(np.sqrt(self.dim_3d))
-    #     initial_state = torch.zeros(
-    #         1,
-    #         self.dim_t,
-    #         self.dim_3d,
-    #         self.dim_3d,
-    #         self.dim_3d,
-    #     )
-    #     # matrix_dims = (
-    #     #     torch.randint(1, max_matrix_size, (3,)).detach().cpu().numpy().tolist()
-    #     # )
-    #     # operation_tensor = self._build_initial_state(*matrix_dims, self.dim_t)
-    #     operation_tensor = build_matmul_tensor(max_matrix_size, max_matrix_size, max_matrix_size, self.dim_t)
-    #     # operation_tensor = self._build_initial_state(max_matrix_size, max_matrix_size, max_matrix_size, self.dim_t)
-    #     initial_state[
-    #         0,
-    #         :,
-    #         : operation_tensor.shape[1],
-    #         : operation_tensor.shape[2],
-    #         : operation_tensor.shape[3],
-    #     ] = operation_tensor
-    #     return initial_state.to(self.device)
-    #
-    # @staticmethod
-    # def _build_initial_state(dim_1: int, dim_k: int, dim_2: int, dim_t: int):
-    #     """Build the initial state for the game/act step. The input tensor has shape
-    #     (dim_t, dim_3d, dim_3d, dim_3d).
-    #     The first slice represent the matrix multiplication tensor which will
-    #     be reduced by the TensorGame algorithm. The other slices represent the
-    #     previous tensor state memory and are set to zero for the initial state.
-    #     """
-    #     initial_state = torch.zeros(
-    #         dim_t, dim_1 * dim_k, dim_k * dim_2, dim_1 * dim_2
-    #     )
-    #     for ij in range(dim_1 * dim_2):
-    #         for k in range(dim_k):
-    #             initial_state[
-    #                 0, (ij // dim_2) * dim_k + k, k * dim_2 + ij % dim_2, ij
-    #             ] = 1
-    #     return initial_state
-
 
 class StrassenDemoDataset(Dataset):
     """Dataset of all valid (states, action) pairs in all permutations of the Strassen factorization
@@ -427,7 +382,6 @@ class StrassenDemoDataset(Dataset):
             bitstring = format(i_bits, "b").zfill(self.n_total)
             used_indexes = [i for i in range(self.n_total) if bitstring[i] == "1"]
             avail_indexes = [i for i in range(self.n_total) if bitstring[i] == "0"]
-            # n_used = len(used_indexes)
             n_avail = len(avail_indexes)
             target_tensor = strassen_tensor.clone()
             for j in used_indexes:
