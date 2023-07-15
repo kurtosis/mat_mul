@@ -51,7 +51,7 @@ class TrainingApp:
             default=4,
         )
         parser.add_argument(
-            "--n_mc",
+            "--n_sim",
             help="Number of simulations to run at each step of MC tree search",
             type=int,
             default=4,
@@ -100,8 +100,8 @@ class TrainingApp:
             help="N_bar parameter for policy improvement temperature.",
         )
         parser.add_argument("--tb_prefix", type=str, default="tensor_game")
-        parser.add_argument("--fract_synth", type=float, default=0.75)
-        parser.add_argument("--fract_best", type=float, default=0.05)
+        parser.add_argument("--fract_synth", type=float, default=0.90)
+        parser.add_argument("--fract_best", type=float, default=0.0)
         parser.add_argument("--start_rank", type=int, default=1)
         parser.add_argument("--dropout_p", type=float, default=0.5)
         parser.add_argument(
@@ -474,16 +474,11 @@ class TensorGameTrainingApp(TrainingApp):
         best_reward = -1e6
         best_game = None
         for _ in range(self.args.n_games):
-            # state_seq, action_seq, reward_seq = actor_prediction_simple(
-            #     self.model,
-            #     initial_state,
-            #     self.args.max_actions,
-            # )
             state_seq, action_seq, reward_seq = actor_prediction(
                 self.model,
                 self.dataset.start_tensor,
                 self.args.max_actions,
-                self.args.n_mc,
+                self.args.n_sim,
                 self.args.n_bar,
             )
             if reward_seq[-1] > best_reward:
@@ -502,10 +497,8 @@ class TensorGameTrainingApp(TrainingApp):
         print_params(self.model)
         self.dataset.set_fractions(self.args.fract_synth, self.args.fract_best)
         for i_epoch in range(self.args.n_epochs):
-            # if i_epoch + 1 == self.args.n_epochs // 50:
-            #     # is this even necessary?
-            #     self.dataset.set_fractions(0.7, 0.05)
-            print("start training")
+            if i_epoch + 1 == self.args.n_epochs // 50:
+                self.dataset.set_fractions(0.25, 0.05)
             t0 = time.time()
             self.train_step(i_epoch)
             t1 = time.time()
@@ -528,7 +521,6 @@ class TensorGameTrainingApp(TrainingApp):
             # Save model
             if i_epoch % self.args.n_save == 0:
                 self.save_model(self.args.tb_prefix, i_epoch)
-                # TO DO: decide how to handle saving dataset
 
 
 if __name__ == "__main__":

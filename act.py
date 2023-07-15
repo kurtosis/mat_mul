@@ -9,7 +9,7 @@ def actor_prediction(
     model: AlphaTensor,
     initial_state: torch.Tensor,
     max_actions: int,
-    n_mc: int,
+    n_sim: int,
     n_bar: int,
 ):
     """Given a model and initial state, produce a single game trajectory.
@@ -18,7 +18,7 @@ def actor_prediction(
         model: AlphaTensor model to select actions
         initial_state: Initial state of trajectory.
         max_actions: The maximum number of actions to take in a trajectory
-        n_mc: The number of simulations to run.
+        n_sim: The number of simulations to run.
         n_bar: The parameter used to compute the improved policy.
     Returns:
         state_seq: A list of states in the trajectory.
@@ -40,7 +40,7 @@ def actor_prediction(
         state, mc_tree, state_info = mc_ts(
             model,
             state,
-            n_mc,
+            n_sim,
             i_action,
             max_actions,
             mc_tree,
@@ -67,7 +67,7 @@ def actor_prediction(
 def mc_ts(
     model: AlphaTensor,
     root_state: torch.Tensor,
-    n_mc: int,
+    n_sim: int,
     i_action: int,
     max_actions: int,
     mc_tree: dict,
@@ -78,7 +78,7 @@ def mc_ts(
     Args:
         model: main AlphaTensor model.
         root_state: Root state for next step exploration.
-        n_mc: The number of simulated paths to play from root state.
+        n_sim: The number of simulated paths to play from root state.
         i_action: The current action index.
         max_actions: The maximum number of actions to play to.
         mc_tree: Tree of states explored by MC.
@@ -95,10 +95,10 @@ def mc_ts(
         with torch.no_grad():
             visit_count = state_info[state_string][3]
             # reduce number of sims to run by number of previous visits
-            n_mc -= int(visit_count.sum())
-            n_mc = max(n_mc, 0)
+            n_sim -= int(visit_count.sum())
+            n_sim = max(n_sim, 0)
 
-    for i_mc in range(n_mc):
+    for i_mc in range(n_sim):
         mc_tree, state_info = extend_tree(
             model, root_state, i_action, max_actions, mc_tree, state_info
         )
