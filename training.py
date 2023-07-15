@@ -3,8 +3,8 @@ import datetime
 import hashlib
 import json
 import logging
-import os
 import sys
+import time
 
 from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
@@ -28,9 +28,10 @@ class TrainingApp:
         parser.add_argument("--lr_initial", type=float, default=1e-3)
         parser.add_argument("--lr_final", type=float, default=1e-4)
         parser.add_argument("--lr_decay_epochs", type=int, default=10)
-        parser.add_argument("--dropout_p", type=float, default=0.5)
-        parser.add_argument("--len_data", type=int, default=200)
+        parser.add_argument("--len_data", type=int, default=20000)
         parser.add_argument("--n_epochs", type=int, default=201)
+
+        # MC parameters
         parser.add_argument(
             "--n_act",
             help="Frequency (in epochs) of MC tree search",
@@ -53,7 +54,7 @@ class TrainingApp:
             "--n_mc",
             help="Number of simulations to run at each step of MC tree search",
             type=int,
-            default=8,
+            default=4,
         )
         parser.add_argument(
             "--n_samples",
@@ -61,17 +62,25 @@ class TrainingApp:
             type=int,
             default=8,
         )
+
         parser.add_argument(
             "--n_val", help="Frequency (in epochs) of validation", type=int, default=10
         )
         parser.add_argument(
             "--n_save", help="Frequency (in epochs) of model save", type=int, default=10
         )
-        parser.add_argument("--batch_size", type=int, default=512)
-        parser.add_argument("--dim_3d", type=int, default=4)
+        parser.add_argument("--batch_size", type=int, default=256)
+
+        # Model dimensionality parameters
         parser.add_argument("--dim_t", type=int, default=2)
         parser.add_argument("--dim_s", type=int, default=1)
         parser.add_argument("--dim_c", type=int, default=8)
+        parser.add_argument("--n_feats", type=int, default=8)
+        parser.add_argument("--n_heads", type=int, default=4)
+        parser.add_argument("--n_hidden", type=int, default=128)
+
+        # Matrix multiplication parameters
+        parser.add_argument("--dim_3d", type=int, default=4)
         parser.add_argument(
             "--n_steps",
             help="Number of steps in a complete action",
@@ -81,22 +90,20 @@ class TrainingApp:
         parser.add_argument(
             "--n_logits", help="Cardinality of action token set", type=int, default=3
         )
-        parser.add_argument("--n_feats", type=int, default=4)
-        parser.add_argument("--n_heads", type=int, default=4)
-        parser.add_argument("--n_hidden", type=int, default=512)
-        parser.add_argument("--device", type=str, default="mps")
+        parser.add_argument("--device", type=str, default="cpu")
         parser.add_argument("--weight_pol", type=int, default=1)
         parser.add_argument("--weight_val", type=int, default=1000)
         parser.add_argument(
             "--n_bar",
             type=int,
             default=100,
-            help="N_bar parameter for policy temperature.",
+            help="N_bar parameter for policy improvement temperature.",
         )
         parser.add_argument("--tb_prefix", type=str, default="tensor_game")
         parser.add_argument("--fract_synth", type=float, default=0.75)
         parser.add_argument("--fract_best", type=float, default=0.05)
         parser.add_argument("--start_rank", type=int, default=1)
+        parser.add_argument("--dropout_p", type=float, default=0.5)
         parser.add_argument(
             "--model_file",
             type=str,
@@ -245,7 +252,8 @@ class SyntheticDemoTrainingApp(TrainingApp):
         """Input: current environment: state_batch and scalar_batch
         Output: new environment: state_batch and scalar_batch, best ranks, actions"""
         aa, pp, qq = self.model.fwd_infer(state_batch, scalar_batch, n_samples=1)
-        aa[aa == 0] = 2  # hack to avoid choosing <SOS> token
+        # don't need this now b/c we shifted
+        # aa[aa == 0] = 2  # hack to avoid choosing <SOS> token
         uu, vv, ww = torch.split(aa.squeeze() - 2, self.args.dim_3d, dim=-1)
         action_tensor = uvw_to_tensor((uu, vv, ww))
         new_head = state_batch[:, 0] - action_tensor
@@ -369,6 +377,8 @@ class TensorGameTrainingApp(TrainingApp):
                 self.args.dim_3d,
                 shift,
             )
+            action_seq = [torch.tensor([2, 1, 1, 1, 2, 1, 1, 1, 2, 1, 1, 1])]
+            start_tensor = action_to_tensor(action_seq[0])
             start_tensor = start_tensor.unsqueeze(0)
             start_tensor = torch.cat(
                 (
@@ -393,6 +403,7 @@ class TensorGameTrainingApp(TrainingApp):
             self.args.dim_3d,
             self.args.device,
             start_tensor=start_tensor,
+            action_seq=action_seq,
         )
         dataset_val = SyntheticDemoDataset(
             self.args.max_actions,
@@ -455,9 +466,9 @@ class TensorGameTrainingApp(TrainingApp):
     def act_step(self):
         """Plays a set of games and adds trajectories to played games buffer.
         Best game is added to best games buffer.
-        Args:
-            initial_state: initial value of the tensor to reduce
-            n_games: number of games/trajectories to produce
+        # Args:
+        #     initial_state: initial value of the tensor to reduce
+        #     n_games: number of games/trajectories to produce
         """
         self.model.eval()
         best_reward = -1e6
@@ -488,20 +499,33 @@ class TensorGameTrainingApp(TrainingApp):
 
     def main(self):
         self.model = self.model.to(self.args.device)
+        print_params(self.model)
         self.dataset.set_fractions(self.args.fract_synth, self.args.fract_best)
         for i_epoch in range(self.args.n_epochs):
             # if i_epoch + 1 == self.args.n_epochs // 50:
             #     # is this even necessary?
             #     self.dataset.set_fractions(0.7, 0.05)
+            print("start training")
+            t0 = time.time()
             self.train_step(i_epoch)
+            t1 = time.time()
+            print(f"train time {t1 - t0}")
 
+            # Validate
             if i_epoch % self.args.n_val == 0:
+                t0 = time.time()
                 self.val_step(i_epoch)
+                t1 = time.time()
+                print(f"val time {t1 - t0}")
 
-            # Solution search printout
+            # Search for solution
             if i_epoch % self.args.n_act == 0:
+                t0 = time.time()
                 self.act_step()
+                t1 = time.time()
+                print(f"act time {t1 - t0}")
 
+            # Save model
             if i_epoch % self.args.n_save == 0:
                 self.save_model(self.args.tb_prefix, i_epoch)
                 # TO DO: decide how to handle saving dataset

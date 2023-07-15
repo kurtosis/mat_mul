@@ -209,7 +209,14 @@ def create_synthetic_demo(
     dim_3d: int,
     shift: int,
 ):
-    """Generate a mult tensor and a list of actions producing it"""
+    """Generate a mult tensor and a list of actions producing it.
+    Args:
+        values: Allowable values in the uvw factors
+        probs: Distribution to sample values from
+        n_actions: Rank of the mult tensor (# of actions to take)
+        dim_3d: Dimension of the mult tensor
+        shift: Amount to shift values by so they are zero-indexed
+        """
     target_tensor = torch.zeros(dim_3d, dim_3d, dim_3d)
     action_seq = []
     for i in range(n_actions):

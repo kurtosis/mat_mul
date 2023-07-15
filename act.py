@@ -89,8 +89,8 @@ def mc_ts(
         mc_tree: Tree updated based on chosen action
         state_info: Info updated based on chosen action
     """
-    headstate = get_head_state(root_state)
-    state_string = state_to_str(headstate)
+    head_state = get_head_state(root_state)
+    state_string = state_to_str(head_state)
     if state_string in state_info:
         with torch.no_grad():
             visit_count = state_info[state_string][3]
@@ -136,15 +136,15 @@ def extend_tree(
         horizon: Number of actions to play forward from root state.
 
     Returns:
-        state_info
-        mc_tree
+        new_state_info
+        new_mc_tree
     """
     new_state_info = state_info.copy()
     new_mc_tree = mc_tree.copy()
     idx = i_action
     max_actions_mc = min(max_actions, i_action + horizon)
-    headstate = get_head_state(state)
-    state_string = state_to_str(headstate)
+    head_state = get_head_state(state)
+    state_string = state_to_str(head_state)
     trajectory = []
     while state_string in new_mc_tree:
         (
@@ -170,8 +170,8 @@ def extend_tree(
             print("trajectory too long")
             pass
         state = candidate_states[state_idx]
-        headstate = get_head_state(state)
-        state_string = state_to_str(headstate)
+        head_state = get_head_state(state)
+        state_string = state_to_str(head_state)
         idx += 1
 
     # extension
@@ -200,8 +200,8 @@ def extend_tree(
             not_dupl_actions = actions[:, :].to("cpu")
             not_dupl_q_values = torch.zeros(not_dupl_actions.shape[:-1]).to("cpu")
             visit_count = torch.zeros_like(not_dupl_q_values).to("cpu")
-            headstate = get_head_state(state)
-            state_string = state_to_str(headstate)
+            head_state = get_head_state(state)
+            state_string = state_to_str(head_state)
             new_state_info[state_string] = (
                 candidate_states,
                 0,  # cloned_idx_to_idx
@@ -256,7 +256,7 @@ def select_next_state(
     c2=19652.0,
     return_idx: bool = False,
 ):
-    """Select next state from candidates that maximizes UCB"""
+    """Select the next state, from among candidates, which maximizes UCB"""
     pi = torch.tensor(
         [len(reps[i]) for i in range(len(candidate_states)) if i in reps]
     ).to(q_vals.device)
@@ -283,10 +283,10 @@ def get_child_states(state: torch.Tensor, actions: torch.Tensor, vec_cardinality
     action_tensor = action_to_tensor(actions)
     # TO DO: remove duplicates if nec
     # action_tensor, _ = remove_duplicates(action_tensor)
-    initial_headstate = get_head_state(state)
-    new_headstates = initial_headstate - action_tensor
+    initial_head_state = get_head_state(state)
+    new_head_states = initial_head_state - action_tensor
     new_states = [
-        torch.cat([new_headstates[:, i : i + 1], state[:, :-1]], dim=1)
+        torch.cat([new_head_states[:, i : i + 1], state[:, :-1]], dim=1)
         for i in range(k)
     ]
     return new_states
@@ -294,7 +294,7 @@ def get_child_states(state: torch.Tensor, actions: torch.Tensor, vec_cardinality
     # return [
     #     torch.cat(
     #         [
-    #             new_headstates[:, i : i + 1],
+    #             new_head_states[:, i : i + 1],
     #             action_tensor[:, i : i + 1],
     #             rolling_states,
     #         ],

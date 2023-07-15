@@ -179,7 +179,7 @@ class PredictActionLogits(nn.Module):
         dim_c: int,
         n_feats=64,
         n_heads=32,
-        n_layers=4,
+        n_layers=2,
         device="cpu",
         **kwargs
     ):
@@ -255,6 +255,7 @@ class PolicyHead(nn.Module):
             dtype=torch.long,
             device=self.device,
         )
+        aa[:, :, 0] = self.n_logits  # start w/ SOS token
         pp = torch.ones(batch_size, self.n_samples, device=self.device)
         # TO DO: understand these lines
         ee = ee.unsqueeze(1).repeat(

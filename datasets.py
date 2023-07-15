@@ -242,6 +242,7 @@ class TensorGameDataset(Dataset):
         dim_3d: int,
         device: str,
         start_tensor=None,
+        action_seq=None,
         **kwargs,
     ):
         super().__init__()
@@ -278,6 +279,7 @@ class TensorGameDataset(Dataset):
             )
         else:
             self.start_tensor = start_tensor
+            self.action_seq = action_seq
 
     def __len__(self):
         """Return the length of the dataset."""
